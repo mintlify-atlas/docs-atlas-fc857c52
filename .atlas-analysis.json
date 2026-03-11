@@ -1,0 +1,114 @@
+{
+  "projectType": "framework",
+  "projectName": "ruby-ldapserver",
+  "projectDescription": "A lightweight, pure Ruby framework for implementing LDAP server applications",
+  "theme": "aspen",
+  "primaryColor": "#d29915",
+  "lightColor": "#e5e7d2",
+  "darkColor": "#0665fc",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/operations",
+              "concepts/router",
+              "concepts/connection-handling"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/building-server",
+              "guides/request-router",
+              "guides/legacy-operation",
+              "guides/schema",
+              "guides/ssl-tls",
+              "guides/threading",
+              "guides/performance"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/hash-storage",
+              "examples/mysql-backend",
+              "examples/prefork-server",
+              "examples/privilege-dropping"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Classes",
+            "pages": [
+              "api/server",
+              "api/connection",
+              "api/operation",
+              "api/router"
+            ]
+          },
+          {
+            "group": "Schema",
+            "pages": [
+              "api/schema",
+              "api/attribute-types",
+              "api/object-classes"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/dn",
+              "api/filter",
+              "api/result",
+              "api/syntax"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Request router with parameterized DN routing",
+    "Legacy Operation class for LDAP operation handling",
+    "Schema support with attribute types and object classes",
+    "SSL/TLS and UNIX socket support",
+    "Multi-threading and prefork server modes",
+    "Attribute range retrieval support",
+    "Filter parsing and matching engine"
+  ],
+  "publicApiSurface": [
+    "LDAP::Server.new",
+    "LDAP::Server#run_tcpserver",
+    "LDAP::Server#run_prefork",
+    "LDAP::Server::Operation#simple_bind",
+    "LDAP::Server::Operation#search",
+    "LDAP::Server::Operation#add",
+    "LDAP::Server::Operation#modify",
+    "LDAP::Server::Operation#del",
+    "LDAP::Server::Operation#modifydn",
+    "LDAP::Server::Operation#compare",
+    "LDAP::Server::Router.new",
+    "LDAP::Server::Router#bind",
+    "LDAP::Server::Router#search",
+    "LDAP::Server::Schema.new",
+    "LDAP::Server::DN.new",
+    "LDAP::Server::Filter.parse"
+  ]
+}
