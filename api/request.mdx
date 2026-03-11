@@ -1,0 +1,272 @@
+---
+title: "LDAP::Server::Request"
+description: "Request object for Router-based LDAP operations"
+---
+
+## Overview
+
+The `LDAP::Server::Request` class represents a single LDAP request and provides methods for sending responses back to the client. This object is automatically created by the Router for each incoming request and passed to your handler methods.
+
+<Note>
+  The Request class is used exclusively with the Router pattern. If you're using the Operation class pattern, response methods are available directly on the Operation instance.
+</Note>
+
+## Attributes
+
+<ParamField path="connection" type="LDAP::Server::Connection">
+  The connection object for this request
+</ParamField>
+
+<ParamField path="typesOnly" type="Boolean">
+  Whether to return only attribute types (no values) in search results
+</ParamField>
+
+<ParamField path="attributes" type="Array<String>">
+  Array of requested attribute names for search operations
+</ParamField>
+
+<ParamField path="rescount" type="Integer">
+  Count of search results sent so far
+</ParamField>
+
+<ParamField path="sizelimit" type="Integer">
+  Maximum number of search results to return
+</ParamField>
+
+## Response Methods
+
+### Search Responses
+
+#### `send_SearchResultEntry(dn, avs, opt={})`
+
+Sends a single search result entry to the client.
+
+<ParamField path="dn" type="String" required>
+  Distinguished Name of the entry
+</ParamField>
+
+<ParamField path="avs" type="Hash" required>
+  Attribute-value hash where keys are attribute names and values are arrays of values
+</ParamField>
+
+<ParamField path="opt" type="Hash">
+  Optional parameters (reserved for future use)
+</ParamField>
+
+```ruby
+request.send_SearchResultEntry(
+  "uid=john,ou=users,dc=example,dc=com",
+  {
+    'uid' => ['john'],
+    'cn' => ['John Doe'],
+    'mail' => ['john@example.com'],
+    'objectClass' => ['inetOrgPerson', 'person', 'top']
+  }
+)
+```
+
+<Info>
+  The method automatically:
+  - Enforces size limits (raises `SizeLimitExceeded` if exceeded)
+  - Filters attributes based on the requested list
+  - Handles schema-based attribute normalization
+  - Respects `typesOnly` flag
+</Info>
+
+#### `send_SearchResultDone(resultCode, opt={})`
+
+Sends the final search result message indicating completion.
+
+<ParamField path="resultCode" type="Integer" required>
+  Result code (0 for success, or error code)
+</ParamField>
+
+<ParamField path="opt" type="Hash">
+  Optional parameters:
+  - `:matchedDN` - Matched DN for partial results
+  - `:errorMessage` - Error message string
+  - `:referral` - Array of referral URLs
+</ParamField>
+
+```ruby
+# Success
+request.send_SearchResultDone(0)
+
+# Error with message
+request.send_SearchResultDone(
+  LDAP::ResultError::NoSuchObject.new.to_i,
+  errorMessage: "Entry not found"
+)
+```
+
+### Bind Responses
+
+#### `send_BindResponse(resultCode, opt={})`
+
+Sends a bind response to the client.
+
+<ParamField path="resultCode" type="Integer" required>
+  Result code (0 for success, or error code)
+</ParamField>
+
+<ParamField path="opt" type="Hash">
+  Optional parameters:
+  - `:serverSaslCreds` - SASL credentials (for SASL bind)
+  - `:errorMessage` - Error message string
+</ParamField>
+
+```ruby
+# The Router typically handles bind responses automatically
+# You only need to raise exceptions for errors
+```
+
+<Note>
+  When using the Router pattern, bind responses are sent automatically. You only need to raise `LDAP::ResultError` exceptions for authentication failures.
+</Note>
+
+### Modify Responses
+
+#### `send_ModifyResponse(resultCode, opt={})`
+
+Sends a modify operation response.
+
+<ParamField path="resultCode" type="Integer" required>
+  Result code (0 for success)
+</ParamField>
+
+```ruby
+# In your modify handler
+def modify(request, dn, modifications, params)
+  # Perform modifications...
+  # No need to send response - Router handles it
+  # Just raise exception on error
+end
+```
+
+### Add Responses
+
+#### `send_AddResponse(resultCode, opt={})`
+
+Sends an add operation response.
+
+<ParamField path="resultCode" type="Integer" required>
+  Result code (0 for success)
+</ParamField>
+
+### Delete Responses
+
+#### `send_DelResponse(resultCode, opt={})`
+
+Sends a delete operation response.
+
+<ParamField path="resultCode" type="Integer" required>
+  Result code (0 for success)
+</ParamField>
+
+### ModifyDN Responses
+
+#### `send_ModifyDNResponse(resultCode, opt={})`
+
+Sends a modify DN (rename/move) operation response.
+
+<ParamField path="resultCode" type="Integer" required>
+  Result code (0 for success)
+</ParamField>
+
+### Compare Responses
+
+#### `send_CompareResponse(resultCode, opt={})`
+
+Sends a compare operation response.
+
+<ParamField path="resultCode" type="Integer" required>
+  Result code (6 for compareTrue, 5 for compareFalse)
+</ParamField>
+
+### Extended Responses
+
+#### `send_ExtendedResponse(resultCode, opt={})`
+
+Sends an extended operation response.
+
+<ParamField path="resultCode" type="Integer" required>
+  Result code
+</ParamField>
+
+<ParamField path="opt" type="Hash">
+  Optional parameters:
+  - `:responseName` - Extended operation OID
+  - `:response` - Response data
+</ParamField>
+
+## Limit Methods
+
+### `server_timelimit`
+
+Returns the server-configured time limit for operations.
+
+```ruby
+timelimit = request.server_timelimit  # => Integer or nil
+```
+
+### `server_sizelimit`
+
+Returns the server-configured size limit for search results.
+
+```ruby
+sizelimit = request.server_sizelimit  # => Integer or nil
+```
+
+## Usage Example
+
+Complete example showing Request usage in a Router handler:
+
+```ruby
+class UserHandler
+  def self.search_users(request, basedn, scope, deref, filter, params)
+    users = User.all
+    
+    users.each do |user|
+      dn = "uid=#{user.username},ou=users,dc=example,dc=com"
+      
+      entry = {
+        'uid' => [user.username],
+        'cn' => [user.full_name],
+        'mail' => [user.email],
+        'objectClass' => ['inetOrgPerson', 'person', 'top']
+      }
+      
+      # Filter check
+      if LDAP::Server::Filter.run(filter, entry)
+        request.send_SearchResultEntry(dn, entry)
+      end
+      
+      # Size limit is automatically enforced by send_SearchResultEntry
+    end
+    
+    # Final result is sent automatically by Router
+  end
+end
+```
+
+## Error Handling
+
+The Request object integrates with LDAP result codes. Raise exceptions for errors:
+
+```ruby
+def search_users(request, basedn, scope, deref, filter, params)
+  raise LDAP::ResultError::InsufficientAccessRights unless authorized?
+  
+  # Size limit exceeded is raised automatically
+  results.each do |entry|
+    request.send_SearchResultEntry(entry[:dn], entry[:attributes])
+  end
+end
+```
+
+## See Also
+
+- [Router](/api/router) - Router class that creates Request objects
+- [Result](/api/result) - LDAP result codes and exceptions
+- [Connection](/api/connection) - Connection object accessed via `request.connection`
+- [Request Router Guide](/guides/request-router) - Using the Router pattern

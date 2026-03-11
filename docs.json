@@ -77,7 +77,8 @@
               "api/server",
               "api/connection",
               "api/operation",
-              "api/router"
+              "api/router",
+              "api/request"
             ]
           },
           {

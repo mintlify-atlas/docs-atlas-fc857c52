@@ -107,6 +107,8 @@
     "LDAP::Server::Router.new",
     "LDAP::Server::Router#bind",
     "LDAP::Server::Router#search",
+    "LDAP::Server::Request#send_SearchResultEntry",
+    "LDAP::Server::Request#send_SearchResultDone",
     "LDAP::Server::Schema.new",
     "LDAP::Server::DN.new",
     "LDAP::Server::Filter.parse"
