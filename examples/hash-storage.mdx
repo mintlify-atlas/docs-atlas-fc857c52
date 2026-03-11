@@ -1,0 +1,318 @@
+---
+title: 'Hash Storage with YAML Persistence'
+description: 'Build a simple LDAP server using in-memory hash storage with YAML-based persistence'
+---
+
+This example demonstrates a minimal LDAP server implementation using Ruby's native hash data structure for storage, with YAML serialization for data persistence across restarts.
+
+## Overview
+
+The `rbslapd1.rb` example creates a trivial LDAP server that:
+- Stores directory entries in RAM as a Ruby hash
+- Persists data to disk using YAML format
+- Supports basic LDAP operations (search, add, delete, modify)
+- Runs on port 1389 (non-privileged)
+
+<Warning>
+This example performs no validation or authentication. It's designed to demonstrate the API, not for production use.
+</Warning>
+
+## Implementation
+
+<Steps>
+
+<Step title="Define the Operation Class">
+
+Create a custom operation class that inherits from `LDAP::Server::Operation` and overrides the LDAP operation methods:
+
+```ruby
+class HashOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, hash)
+    super(connection, messageID)
+    @hash = hash   # an object reference to our directory data
+  end
+end
+```
+
+The `@hash` instance variable holds a reference to the shared directory data structure.
+
+</Step>
+
+<Step title="Implement Search Operations">
+
+The search method handles both single-object lookups and subtree searches:
+
+```ruby
+def search(basedn, scope, deref, filter)
+  basedn = basedn.downcase
+
+  case scope
+  when LDAP::Server::BaseObject
+    # client asked for single object by DN
+    obj = @hash[basedn]
+    raise LDAP::ResultError::NoSuchObject unless obj
+    send_SearchResultEntry(basedn, obj) if LDAP::Server::Filter.run(filter, obj)
+
+  when LDAP::Server::WholeSubtree
+    @hash.each do |dn, av|
+      next unless dn.index(basedn, -basedn.length)    # under basedn?
+      next unless LDAP::Server::Filter.run(filter, av)  # attribute filter?
+      send_SearchResultEntry(dn, av)
+    end
+
+  else
+    raise LDAP::ResultError::UnwillingToPerform, "OneLevel not implemented"
+  end
+end
+```
+
+**Key points:**
+- DNs are normalized to lowercase for case-insensitive matching
+- `BaseObject` scope returns a single entry by exact DN match
+- `WholeSubtree` scope iterates through all entries, checking if each DN is under the base DN
+- The filter is applied using `LDAP::Server::Filter.run(filter, attributes)`
+- `OneLevel` scope is not implemented in this simple example
+
+</Step>
+
+<Step title="Implement Add Operations">
+
+Adding entries is straightforward:
+
+```ruby
+def add(dn, av)
+  dn = dn.downcase
+  raise LDAP::ResultError::EntryAlreadyExists if @hash[dn]
+  @hash[dn] = av
+end
+```
+
+The method checks for duplicate entries and raises the appropriate LDAP error if needed.
+
+</Step>
+
+<Step title="Implement Delete Operations">
+
+Deleting entries:
+
+```ruby
+def del(dn)
+  dn = dn.downcase
+  raise LDAP::ResultError::NoSuchObject unless @hash.has_key?(dn)
+  @hash.delete(dn)
+end
+```
+
+</Step>
+
+<Step title="Implement Modify Operations">
+
+The modify operation handles three types of modifications:
+
+```ruby
+def modify(dn, ops)
+  dn = dn.downcase
+  entry = @hash[dn]
+  raise LDAP::ResultError::NoSuchObject unless entry
+  ops.each do |attr, vals|
+    op = vals.shift
+    case op
+    when :add
+      entry[attr] ||= []
+      entry[attr] += vals
+      entry[attr].uniq!
+    when :delete
+      if vals == []
+        entry.delete(attr)
+      else
+        vals.each { |v| entry[attr].delete(v) }
+      end
+    when :replace
+      entry[attr] = vals
+    end
+    entry.delete(attr) if entry[attr] == []
+  end
+end
+```
+
+**Modification types:**
+- `:add` - Adds values to an attribute (with duplicate removal)
+- `:delete` - Removes specific values or the entire attribute if no values specified
+- `:replace` - Replaces all values for an attribute
+
+</Step>
+
+<Step title="Add YAML Persistence">
+
+Load existing data on startup and save on exit:
+
+```ruby
+directory = {}
+
+require 'yaml'
+begin
+  File.open("ldapdb.yaml") { |f| directory = YAML::load(f.read) }
+rescue Errno::ENOENT
+end
+
+at_exit do
+  File.open("ldapdb.new","w") { |f| f.write(YAML::dump(directory)) }
+  File.rename("ldapdb.new","ldapdb.yaml")
+end
+```
+
+**Key features:**
+- Gracefully handles missing database file on first run
+- Uses atomic write pattern (write to `.new` file, then rename) to prevent data corruption
+- Automatically saves on script termination using `at_exit` hook
+
+</Step>
+
+<Step title="Start the Server">
+
+Create and start the LDAP server:
+
+```ruby
+s = LDAP::Server.new(
+  :port            => 1389,
+  :nodelay         => true,
+  :listen          => 10,
+  :operation_class => HashOperation,
+  :operation_args  => [directory]
+)
+s.run_tcpserver
+s.join
+```
+
+**Configuration options:**
+- `:port` - Port number (1389 to avoid requiring root)
+- `:nodelay` - Disable Nagle's algorithm for lower latency
+- `:listen` - TCP listen backlog
+- `:operation_class` - Your custom operation class
+- `:operation_args` - Arguments passed to operation class constructor
+
+</Step>
+
+</Steps>
+
+## Usage
+
+### Starting the Server
+
+```bash
+ruby rbslapd1.rb
+```
+
+### Adding Entries
+
+Use `ldapadd` to populate the directory:
+
+```bash
+ldapadd -x -H ldap://127.0.0.1:1389/
+```
+
+Then enter LDIF data:
+
+```ldif
+dn: dc=example,dc=com
+cn: Top object
+
+dn: cn=Fred Flintstone,dc=example,dc=com
+cn: Fred Flintstone
+sn: Flintstone
+mail: fred@bedrock.org
+mail: fred.flintstone@bedrock.org
+
+dn: cn=Wilma Flintstone,dc=example,dc=com
+cn: Wilma Flintstone
+mail: wilma@bedrock.org
+```
+
+Press `Ctrl-D` when finished.
+
+### Querying the Directory
+
+**Search all entries:**
+```bash
+ldapsearch -x -H ldap://127.0.0.1:1389/ -b "" "(objectclass=*)"
+```
+
+**Search base object only:**
+```bash
+ldapsearch -x -H ldap://127.0.0.1:1389/ -b "dc=example,dc=com" -s base "(objectclass=*)"
+```
+
+**Filter by attribute:**
+```bash
+ldapsearch -x -H ldap://127.0.0.1:1389/ -b "dc=example,dc=com" "(mail=fred*)"
+```
+
+### Data Persistence
+
+When you terminate the server with `Ctrl-C`, the directory contents are automatically written to `ldapdb.yaml`. On the next startup, this data is loaded back into memory.
+
+## Adding SSL Support
+
+<Note>
+To enable SSL/TLS, uncomment the SSL configuration lines in the server initialization.
+</Note>
+
+```ruby
+s = LDAP::Server.new(
+  :port            => 1389,
+  :nodelay         => true,
+  :listen          => 10,
+  :ssl_key_file    => "key.pem",
+  :ssl_cert_file   => "cert.pem",
+  :ssl_on_connect  => true,
+  :operation_class => HashOperation,
+  :operation_args  => [directory]
+)
+```
+
+You'll need to generate a certificate. For testing with a self-signed certificate:
+
+```bash
+env LDAPTLS_REQCERT="allow" ldapsearch -x -H ldaps://127.0.0.1:1389/
+```
+
+## Limitations
+
+<Warning>
+**This example has several important limitations:**
+
+- No schema validation
+- No authentication (binds are not checked)
+- No DN validation
+- OneLevel scope searches not implemented
+- Linear scan for all searches (won't scale to large datasets)
+- No indexing
+- Not suitable for production use
+</Warning>
+
+## Data Structure
+
+The directory is stored as a nested hash:
+
+```ruby
+{
+  "dc=example,dc=com" => {
+    "cn" => ["Top object"]
+  },
+  "cn=fred flintstone,dc=example,dc=com" => {
+    "cn" => ["Fred Flintstone"],
+    "sn" => ["Flintstone"],
+    "mail" => ["fred@bedrock.org", "fred.flintstone@bedrock.org"]
+  }
+}
+```
+
+- Keys are DNs (normalized to lowercase)
+- Values are attribute hashes
+- Each attribute value is an array (LDAP attributes are multi-valued)
+
+## Next Steps
+
+- [MySQL Backend](/examples/mysql-backend) - Learn how to connect LDAP to a SQL database
+- [Preforking Server](/examples/prefork-server) - Scale across multiple processes
+- [Schema Validation](/guides/schema) - Add data validation with LDAP schemas

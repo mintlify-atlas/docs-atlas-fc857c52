@@ -1,0 +1,486 @@
+---
+title: 'Preforking Server'
+description: 'Scale your LDAP server across multiple processes with preforking and add schema validation'
+---
+
+This example demonstrates a production-ready LDAP server architecture using TOMITA Masahiro's prefork library to handle each client connection in a separate process, providing better scalability and avoiding Ruby's threading limitations.
+
+## Overview
+
+The `rbslapd3.rb` example builds on the hash storage example but adds:
+- **Preforking architecture** - Each client connection runs in its own process
+- **File-based synchronization** - Uses disk storage as the shared data store
+- **File locking** - Ensures atomic updates across processes
+- **Schema validation** - Validates entries against LDAP schemas
+- **Operational attributes** - Tracks creation and modification metadata
+
+## Why Preforking?
+
+### Advantages over Threading
+
+<Note>
+**Benefits of the preforking approach:**
+
+- **No thread blocking** - Each client gets its own process, eliminating Ruby GIL concerns
+- **Better multi-processor scaling** - Processes can truly run in parallel
+- **Process isolation** - A problem in one connection won't affect others
+- **File descriptor limits** - Better scalability on single-processor systems
+</Note>
+
+### Trade-offs
+
+<Warning>
+**Disadvantages to consider:**
+
+- **No shared RAM** - State must be persisted to disk
+- **Disk I/O overhead** - Every operation must read/write the YAML file
+- **File locking** - Update operations must acquire an exclusive lock
+</Warning>
+
+## Implementation
+
+<Steps>
+
+<Step title="Create the Directory Class">
+
+Implement a class to manage the YAML database file:
+
+```ruby
+class Directory
+  attr_reader :data
+
+  def initialize(filename)
+    @filename = filename
+    @stat = nil
+    update
+  end
+
+  # synchronise with directory on disk (re-read if it has changed)
+  def update
+    begin
+      tmp = {}
+      sb = File.stat(@filename)
+      return if @stat and @stat.ino == sb.ino and @stat.mtime == sb.mtime
+      File.open(@filename) do |f|
+        tmp = YAML::load(f.read)
+        @stat = f.stat
+      end
+    rescue Errno::ENOENT
+    end
+    @data = tmp
+  end
+
+  # write back to disk
+  def write
+    File.open(@filename+".new","w") { |f| f.write(YAML::dump(@data)) }
+    File.rename(@filename+".new",@filename)
+    @stat = File.stat(@filename)
+  end
+
+  # run a block while holding a lock on the database
+  def lock
+    File.open(@filename+".lock","w") do |f|
+      f.flock(File::LOCK_EX)  # will block here until lock available
+      yield
+    end
+  end
+end
+```
+
+**Key features:**
+- `update()` - Re-reads the file only if it has changed (checks inode and mtime)
+- `write()` - Uses atomic write pattern (write to `.new`, then rename)
+- `lock()` - Acquires an exclusive file lock for safe updates
+- Handles missing file gracefully on first run
+
+</Step>
+
+<Step title="Implement Search Operations">
+
+Search operations synchronize with disk before executing:
+
+```ruby
+def search(basedn, scope, deref, filter)
+  $debug << "Search: basedn=#{basedn.inspect}, scope=#{scope.inspect}, deref=#{deref.inspect}, filter=#{filter.inspect}\n" if $debug
+  basedn = basedn.downcase
+
+  case scope
+  when LDAP::Server::BaseObject
+    # client asked for single object by DN
+    @dir.update
+    obj = @dir.data[basedn]
+    raise LDAP::ResultError::NoSuchObject unless obj
+    ok = LDAP::Server::Filter.run(filter, obj)
+    $debug << "Match=#{ok.inspect}: #{obj.inspect}\n" if $debug
+    send_SearchResultEntry(basedn, obj) if ok
+
+  when LDAP::Server::WholeSubtree
+    @dir.update
+    @dir.data.each do |dn, av|
+      $debug << "Considering #{dn}\n" if $debug
+      next unless dn.index(basedn, -basedn.length)    # under basedn?
+      next unless LDAP::Server::Filter.run(filter, av)  # attribute filter?
+      $debug << "Sending: #{av.inspect}\n" if $debug
+      send_SearchResultEntry(dn, av)
+    end
+
+  else
+    raise LDAP::ResultError::UnwillingToPerform, "OneLevel not implemented"
+  end
+end
+```
+
+Calling `@dir.update` before each search ensures the process sees the latest data from disk.
+
+</Step>
+
+<Step title="Implement Add with Schema Validation">
+
+Add operations now include schema validation and operational attributes:
+
+```ruby
+def add(dn, entry)
+  entry = @schema.validate(entry)
+  entry['createTimestamp'] = [Time.now.gmtime.strftime("%Y%m%d%H%MZ")]
+  entry['creatorsName'] = [@connection.binddn.to_s]
+  # FIXME: normalize the DN and check it's below our root DN
+  # FIXME: validate that a superior object exists
+  # FIXME: validate that entry contains the RDN attribute (yuk)
+  dn = dn.downcase
+  @dir.lock do
+    @dir.update
+    raise LDAP::ResultError::EntryAlreadyExists if @dir.data[dn]
+    @dir.data[dn] = entry
+    @dir.write
+  end
+end
+```
+
+**Key additions:**
+- `@schema.validate(entry)` - Validates attributes against the schema
+- Adds `createTimestamp` - LDAP standard operational attribute
+- Adds `creatorsName` - Records who created the entry
+- Wraps update in `@dir.lock` block for atomicity
+- Calls `@dir.update` inside the lock to ensure freshness
+
+<Warning>
+The `lock` block is critical! Without it, concurrent writes from different processes could corrupt the database.
+</Warning>
+
+</Step>
+
+<Step title="Implement Delete Operations">
+
+Delete operations also use file locking:
+
+```ruby
+def del(dn)
+  dn = dn.downcase
+  @dir.lock do
+    @dir.update
+    raise LDAP::ResultError::NoSuchObject unless @dir.data.has_key?(dn)
+    @dir.data.delete(dn)
+    @dir.write
+  end
+end
+```
+
+</Step>
+
+<Step title="Implement Modify with Schema Validation">
+
+Modify operations validate changes and update operational attributes:
+
+```ruby
+def modify(dn, ops)
+  dn = dn.downcase
+  @dir.lock do
+    @dir.update
+    entry = @dir.data[dn]
+    raise LDAP::ResultError::NoSuchObject unless entry
+    entry = @schema.validate(ops, entry)  # also does the update
+    entry['modifyTimestamp'] = [Time.now.gmtime.strftime("%Y%m%d%H%MZ")]
+    entry['modifiersName'] = [@connection.binddn.to_s]
+    @dir.data[dn] = entry
+    @dir.write
+  end
+end
+```
+
+**Schema validation:**
+- `@schema.validate(ops, entry)` - Validates and applies modifications
+- Returns the updated entry
+- Raises schema violation errors if needed
+
+</Step>
+
+<Step title="Load Schema Definition">
+
+Load and configure the LDAP schema:
+
+```ruby
+schema = LDAP::Server::Schema.new
+schema.load_system
+schema.load_file("../test/core.schema")
+schema.resolve_oids
+```
+
+**Schema loading:**
+- `load_system` - Loads built-in schema definitions
+- `load_file` - Loads schema from OpenLDAP-format schema file
+- `resolve_oids` - Resolves OID references and inheritance
+
+</Step>
+
+<Step title="Start the Preforking Server">
+
+Initialize and start the server with preforking:
+
+```ruby
+directory = Directory.new("ldapdb.yaml")
+
+s = LDAP::Server.new(
+  :port            => 1389,
+  :nodelay         => true,
+  :listen          => 10,
+  :operation_class => DirOperation,
+  :operation_args  => [directory],
+  :schema          => schema,
+  :namingContexts  => ['dc=example,dc=com']
+)
+s.run_prefork
+s.join
+```
+
+**Key differences:**
+- `s.run_prefork` instead of `s.run_tcpserver`
+- `:schema` option provides the schema to the server
+- `:namingContexts` declares the supported base DNs
+
+</Step>
+
+</Steps>
+
+## Schema Validation
+
+### Loading Schema Files
+
+The example loads `core.schema`, which contains standard LDAP object classes and attribute types. Schema files use OpenLDAP format:
+
+```
+attributetype ( 2.5.4.4 NAME 'sn'
+  DESC 'RFC2256: last (family) name(s) for which the entity is known by'
+  SUP name )
+
+objectclass ( 2.5.6.6 NAME 'person'
+  DESC 'RFC2256: a person'
+  SUP top STRUCTURAL
+  MUST ( sn $ cn )
+  MAY ( userPassword $ telephoneNumber $ seeAlso $ description ) )
+```
+
+### Valid Entry Example
+
+With schema validation enabled, entries must conform to their object classes:
+
+```ldif
+dn: cn=Fred Flintstone,dc=example,dc=com
+objectClass: organizationalPerson
+cn: Fred Flintstone
+sn: Flintstone
+telephoneNumber: +1 555 1234
+telephoneNumber: +1 555 5432
+```
+
+**This entry is valid because:**
+- `organizationalPerson` allows these attributes
+- Required attributes (`cn`, `sn`) are present
+- Values match attribute type syntax
+
+<Warning>
+The simple entries from the hash storage example will fail schema validation. You must use valid object classes and required attributes.
+</Warning>
+
+### What Gets Validated
+
+<Note>
+**Schema validation checks:**
+
+✓ Attribute types exist and match defined syntax
+✓ Attributes are allowed by the object classes
+✓ Required attributes are present
+✓ Attribute values match syntax rules
+
+✗ DN structure is not validated
+✗ RDN attributes presence not enforced
+</Note>
+
+## Usage
+
+### Starting the Server
+
+```bash
+ruby rbslapd3.rb
+```
+
+### Adding a Valid Entry
+
+```bash
+ldapadd -x -H ldap://127.0.0.1:1389/
+```
+
+Enter:
+
+```ldif
+dn: cn=Fred Flintstone,dc=example,dc=com
+objectClass: organizationalPerson
+cn: Fred Flintstone
+sn: Flintstone
+telephoneNumber: +1 555 1234
+telephoneNumber: +1 555 5432
+```
+
+### Searching
+
+```bash
+ldapsearch -x -H ldap://127.0.0.1:1389/ -b "dc=example,dc=com" "(cn=Fred*)"
+```
+
+### Viewing Operational Attributes
+
+Request operational attributes explicitly:
+
+```bash
+ldapsearch -x -H ldap://127.0.0.1:1389/ -b "dc=example,dc=com" \
+  "(cn=Fred*)" '+' '*'
+```
+
+This shows both regular attributes (`*`) and operational attributes (`+`):
+
+```ldif
+dn: cn=Fred Flintstone,dc=example,dc=com
+objectClass: organizationalPerson
+cn: Fred Flintstone
+sn: Flintstone
+telephoneNumber: +1 555 1234
+telephoneNumber: +1 555 5432
+createTimestamp: 20260311143022Z
+creatorsName: 
+modifyTimestamp: 20260311143045Z
+modifiersName: 
+```
+
+## File Locking Patterns
+
+### Read Operations (No Lock)
+
+```ruby
+@dir.update  # Just refresh from disk
+# ... use @dir.data ...
+```
+
+Read operations don't need locks because:
+- Each process has its own copy
+- `update()` is idempotent
+- Stale data is acceptable for reads
+
+### Write Operations (Must Lock)
+
+```ruby
+@dir.lock do
+  @dir.update  # Get latest data
+  # ... modify @dir.data ...
+  @dir.write   # Write back atomically
+end
+```
+
+Write operations must:
+1. Acquire exclusive lock
+2. Re-read the file (another process may have updated it)
+3. Modify the data
+4. Write back atomically
+5. Release lock
+
+## Performance Considerations
+
+### Disk I/O Overhead
+
+<Warning>
+**Every operation involves disk I/O:**
+
+- Searches read the YAML file
+- Updates read, modify, and write the file
+- File must be parsed/serialized as YAML each time
+
+This limits scalability for high-traffic scenarios.
+</Warning>
+
+### Optimization Strategies
+
+For better performance:
+
+1. **Use a real database** - PostgreSQL, MySQL, or LMDB
+2. **Cache reads** - Keep a timestamp-based cache in each process
+3. **Batch updates** - Accumulate changes and flush periodically
+4. **Use binary format** - Marshal is faster than YAML
+
+### When to Use Preforking
+
+Preforking is ideal when:
+- You need true parallelism across CPU cores
+- Individual operations might block (I/O, external APIs)
+- Process isolation is important for stability
+- You have sufficient RAM for multiple processes
+
+## Process Architecture
+
+```
+                    ┌─────────────┐
+                    │   Master    │
+                    │   Process   │
+                    └──────┬──────┘
+                           │
+        ┌──────────────────┼──────────────────┐
+        │                  │                  │
+   ┌────▼────┐        ┌────▼────┐       ┌────▼────┐
+   │ Worker  │        │ Worker  │       │ Worker  │
+   │ Process │        │ Process │       │ Process │
+   └────┬────┘        └────┬────┘       └────┬────┘
+        │                  │                  │
+        │                  │                  │
+   ┌────▼────┐        ┌────▼────┐       ┌────▼────┐
+   │ Client  │        │ Client  │       │ Client  │
+   │Connection│       │Connection│      │Connection│
+   └─────────┘        └─────────┘       └─────────┘
+
+                All processes share:
+              ┌─────────────────────┐
+              │   ldapdb.yaml       │
+              │   (via file locks)  │
+              └─────────────────────┘
+```
+
+## Debugging
+
+Enable debug output:
+
+```ruby
+$debug = $stderr
+```
+
+This logs:
+- Search parameters and results
+- Filter matching decisions
+- Entries being sent to clients
+
+Redirect to a file:
+
+```ruby
+$debug = File.open("ldap-debug.log", "a")
+```
+
+## Next Steps
+
+- [Privilege Dropping](/examples/privilege-dropping) - Bind to port 389 safely
+- [Schema Validation](/guides/schema) - Deep dive into LDAP schemas
+- [Custom Operations](/guides/custom-operations) - Extend operation classes further

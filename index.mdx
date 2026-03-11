@@ -1,97 +1,145 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "ruby-ldapserver"
+description: "A lightweight, pure Ruby framework for implementing LDAP server applications"
 ---
 
-## Setting up
+<div style={{
+  background: 'linear-gradient(135deg, #e5e7d2 0%, #d29915 100%)',
+  padding: '3rem 2rem',
+  borderRadius: '8px',
+  marginBottom: '2rem',
+  textAlign: 'center'
+}}>
+  <h1 style={{ fontSize: '2.5rem', fontWeight: 'bold', marginBottom: '1rem', color: '#000000' }}>
+    Build LDAP Servers with Ruby
+  </h1>
+  <p style={{ fontSize: '1.25rem', color: '#000000', maxWidth: '800px', margin: '0 auto' }}>
+    A pure Ruby framework for implementing LDAP server applications with flexible routing, schema support, and powerful threading capabilities
+  </p>
+</div>
 
-Get your documentation site up and running in minutes.
+## Get Started
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+Get up and running with ruby-ldapserver in minutes.
 
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
+<CardGroup cols={2}>
   <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
+    title="Installation"
+    icon="download"
+    href="/installation"
   >
-    Edit your docs locally and preview them in real time.
-  </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+    Install the gem and set up your development environment
   </Card>
   <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
+    title="Quickstart"
+    icon="rocket"
+    href="/quickstart"
   >
-    Auto-generate API documentation from OpenAPI specifications.
+    Build your first LDAP server in under 5 minutes
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Key Features
 
-Everything you need to create world-class documentation.
+Powerful capabilities for building production-ready LDAP servers.
 
-<Columns cols={2}>
+<CardGroup cols={2}>
   <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
+    title="Request Router"
+    icon="route"
+    href="/guides/request-router"
   >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+    Route LDAP requests with parameterized DNs to controller actions
   </Card>
   <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
+    title="Schema Support"
+    icon="sitemap"
+    href="/guides/schema"
   >
-    Display images and other media.
+    Define and validate attribute types and object classes
   </Card>
   <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
+    title="SSL/TLS & Sockets"
+    icon="lock"
+    href="/guides/ssl-tls"
   >
-    Write once and reuse across your docs.
+    Secure connections with SSL/TLS or UNIX domain sockets
   </Card>
-</Columns>
+  <Card
+    title="Multi-threading"
+    icon="microchip"
+    href="/guides/threading"
+  >
+    Handle concurrent connections with threading or prefork modes
+  </Card>
+</CardGroup>
 
-## Need inspiration?
+## Learn the Concepts
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+Understand the core architecture and design patterns.
+
+<CardGroup cols={2}>
+  <Card
+    title="Architecture"
+    icon="diagram-project"
+    href="/concepts/architecture"
+  >
+    Learn how ruby-ldapserver components work together
+  </Card>
+  <Card
+    title="Operations"
+    icon="gears"
+    href="/concepts/operations"
+  >
+    Handle LDAP operations like bind, search, add, and modify
+  </Card>
+  <Card
+    title="Router"
+    icon="map-location-dot"
+    href="/concepts/router"
+  >
+    Map DNs to controller actions with the routing system
+  </Card>
+  <Card
+    title="Connection Handling"
+    icon="plug"
+    href="/concepts/connection-handling"
+  >
+    Manage client connections and request processing
+  </Card>
+</CardGroup>
+
+## Explore Examples
+
+Real-world implementations to learn from.
+
+<CardGroup cols={2}>
+  <Card
+    title="Hash Storage"
+    icon="database"
+    href="/examples/hash-storage"
+  >
+    Simple in-memory LDAP server with YAML persistence
+  </Card>
+  <Card
+    title="MySQL Backend"
+    icon="server"
+    href="/examples/mysql-backend"
+  >
+    Connect LDAP queries to a MySQL database
+  </Card>
+  <Card
+    title="Prefork Server"
+    icon="arrows-split-up-and-left"
+    href="/examples/prefork-server"
+  >
+    Scale with multi-process preforking architecture
+  </Card>
+  <Card
+    title="Privilege Dropping"
+    icon="shield-halved"
+    href="/examples/privilege-dropping"
+  >
+    Bind to port 389 and drop root privileges safely
+  </Card>
+</CardGroup>

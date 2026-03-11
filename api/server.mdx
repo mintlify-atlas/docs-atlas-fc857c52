@@ -1,0 +1,206 @@
+---
+title: "LDAP::Server"
+description: "Main server class for creating and managing LDAP servers"
+---
+
+## Overview
+
+The `LDAP::Server` class is the main entry point for creating an LDAP server. It handles server initialization, SSL configuration, and provides methods for running the server in different modes.
+
+## Class Methods
+
+### `new(opt = DEFAULT_OPT)`
+
+Creates a new LDAP server instance.
+
+<ParamField path="opt" type="Hash" default="DEFAULT_OPT">
+  Configuration options for the server. Accepts the following keys:
+  
+  <Expandable title="Configuration Options">
+    <ParamField path="port" type="Integer" default="389">
+      Port number for the server to listen on
+    </ParamField>
+    
+    <ParamField path="nodelay" type="Boolean" default="true">
+      TCP_NODELAY socket option
+    </ParamField>
+    
+    <ParamField path="router" type="LDAP::Server::Router">
+      Request router instance. If provided, overrides `:operation_class`
+    </ParamField>
+    
+    <ParamField path="operation_class" type="Class" default="LDAP::Server::Operation">
+      Operation handler class for processing requests
+    </ParamField>
+    
+    <ParamField path="operation_args" type="Array" default="[]">
+      Arguments passed to Operation.new
+    </ParamField>
+    
+    <ParamField path="ssl_key_file" type="String">
+      Path to PEM-encoded SSL private key file (enables SSL)
+    </ParamField>
+    
+    <ParamField path="ssl_cert_file" type="String">
+      Path to PEM-encoded SSL certificate file (enables SSL)
+    </ParamField>
+    
+    <ParamField path="ssl_ca_path" type="String">
+      Directory containing CA certificates for peer verification
+    </ParamField>
+    
+    <ParamField path="ssl_dhparams" type="String">
+      Path to Diffie-Hellman parameters file
+    </ParamField>
+    
+    <ParamField path="ssl_verify_mode" type="Integer">
+      OpenSSL verification mode for peer certificates
+    </ParamField>
+    
+    <ParamField path="schema" type="LDAP::Server::Schema">
+      Schema object for the server
+    </ParamField>
+    
+    <ParamField path="namingContexts" type="Array<String>">
+      Array of base DNs that the server answers for
+    </ParamField>
+    
+    <ParamField path="logger" type="Logger">
+      Logger instance. Defaults to `Logger.new($stderr)` with INFO level
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+```ruby
+server = LDAP::Server.new(
+  port: 1389,
+  operation_class: MyOperationHandler,
+  namingContexts: ['dc=example,dc=com']
+)
+```
+
+### `ssl_prepare(opt)`
+
+Class method that prepares SSL context from configuration options. Called internally during initialization.
+
+<ParamField path="opt" type="Hash">
+  Options hash containing SSL configuration
+</ParamField>
+
+## Instance Methods
+
+### `run_tcpserver`
+
+Starts the server using a TCP server model. Each connection is handled in a new thread.
+
+```ruby
+server = LDAP::Server.new(port: 1389)
+server.run_tcpserver
+server.join
+```
+
+### `run_prefork`
+
+Starts the server using a prefork model. Multiple worker processes are forked to handle connections.
+
+```ruby
+server = LDAP::Server.new(port: 1389)
+server.run_prefork
+server.join
+```
+
+### `join`
+
+Blocks until the server thread terminates. Handles `Interrupt` exceptions gracefully.
+
+```ruby
+server.run_tcpserver
+server.join  # Blocks until Ctrl-C or stop() is called
+```
+
+### `stop`
+
+Stops the server by raising an interrupt in the server thread and waiting for it to terminate.
+
+```ruby
+server.stop
+```
+
+## Instance Attributes
+
+### `root_dse`
+
+Gets or sets the Root DSE (DSA-Specific Entry) hash. This is automatically populated with default values:
+
+```ruby
+{
+  'objectClass' => ['top', 'openLDAProotDSE', 'extensibleObject'],
+  'supportedLDAPVersion' => ['3'],
+  'subschemaSubentry' => [schema.subschema_dn],  # if schema provided
+  'namingContexts' => [...]  # if namingContexts provided
+}
+```
+
+### `logger`
+
+Read-only access to the server's Logger instance.
+
+## Constants
+
+### `DEFAULT_OPT`
+
+Default options hash:
+
+```ruby
+{
+  port: 389,
+  nodelay: true
+}
+```
+
+## SSL Configuration
+
+To enable SSL, provide both `ssl_key_file` and `ssl_cert_file`:
+
+```ruby
+server = LDAP::Server.new(
+  port: 636,
+  ssl_key_file: '/path/to/server.key',
+  ssl_cert_file: '/path/to/server.crt',
+  ssl_ca_path: '/path/to/ca/certs',
+  ssl_dhparams: '/path/to/dhparams.pem'
+)
+```
+
+If `ssl_ca_path` is provided, peer certificates will be verified with `VERIFY_PEER | VERIFY_FAIL_IF_NO_PEER_CERT` unless a custom `ssl_verify_mode` is specified.
+
+## Example
+
+Complete example of setting up and running an LDAP server:
+
+```ruby
+require 'ldap/server'
+
+class MyOperationHandler < LDAP::Server::Operation
+  def simple_bind(version, dn, password)
+    raise LDAP::ResultError::InvalidCredentials unless valid_credentials?(dn, password)
+  end
+  
+  def search(basedn, scope, deref, filter)
+    # Implement search logic
+    entries.each do |dn, attrs|
+      send_SearchResultEntry(dn, attrs)
+    end
+  end
+end
+
+server = LDAP::Server.new(
+  port: 1389,
+  operation_class: MyOperationHandler,
+  namingContexts: ['dc=example,dc=com'],
+  logger: Logger.new($stdout)
+)
+
+server.run_tcpserver
+server.join
+```

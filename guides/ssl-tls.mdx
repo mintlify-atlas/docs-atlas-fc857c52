@@ -1,0 +1,590 @@
+---
+title: SSL/TLS
+description: Setting up SSL/TLS connections and certificate configuration for secure LDAP
+---
+
+## Overview
+
+ruby-ldapserver supports SSL/TLS encryption for secure LDAP connections. You can configure:
+
+- LDAPS (LDAP over SSL) - SSL from initial connection
+- Certificate-based authentication
+- Client certificate verification
+
+<Note>
+SSL/TLS support requires the `openssl` extension, which is standard in Ruby 1.8.2 and later.
+</Note>
+
+## Quick Start
+
+<Steps>
+
+<Step title="Generate certificates">
+Create a self-signed certificate for testing:
+
+```ruby
+#!/usr/bin/env ruby
+require 'openssl'
+
+# Generate RSA key
+key = OpenSSL::PKey::RSA.new(2048) { print "."; $stdout.flush }
+puts
+
+# Create certificate
+cert = OpenSSL::X509::Certificate.new
+cert.version = 2
+cert.serial = 1
+name = OpenSSL::X509::Name.new([
+  ["C", "US"],
+  ["ST", "California"],
+  ["O", "MyCompany"],
+  ["CN", "localhost"]
+])
+cert.subject = name
+cert.issuer = name
+cert.not_before = Time.now
+cert.not_after = Time.now + (365 * 24 * 60 * 60)  # 1 year
+cert.public_key = key.public_key
+
+# Add extensions
+ef = OpenSSL::X509::ExtensionFactory.new(nil, cert)
+cert.extensions = [
+  ef.create_extension("basicConstraints", "CA:FALSE"),
+  ef.create_extension("subjectKeyIdentifier", "hash"),
+  ef.create_extension("extendedKeyUsage", "serverAuth"),
+  ef.create_extension("keyUsage", "keyEncipherment,dataEncipherment,digitalSignature")
+]
+ef.issuer_certificate = cert
+cert.add_extension(ef.create_extension("authorityKeyIdentifier", "keyid:always,issuer:always"))
+
+# Sign certificate
+cert.sign(key, OpenSSL::Digest::SHA256.new)
+
+# Write to disk
+File.open("key.pem", "w", 0600) { |f| f << key.to_pem }
+File.open("cert.pem", "w", 0644) { |f| f << cert.to_pem }
+
+puts "Generated key.pem and cert.pem"
+```
+</Step>
+
+<Step title="Configure SSL server">
+```ruby
+require 'ldap/server'
+
+server = LDAP::Server.new(
+  port: 636,              # Standard LDAPS port
+  ssl_key_file: 'key.pem',
+  ssl_cert_file: 'cert.pem',
+  ssl_on_connect: true,   # Use LDAPS (SSL from start)
+  router: my_router
+)
+
+server.run_tcpserver
+server.join
+```
+</Step>
+
+<Step title="Test the connection">
+```bash
+# Test with ldapsearch
+ldapsearch -x -H ldaps://localhost:636/ -b "dc=example,dc=com"
+
+# For self-signed certificates, disable verification:
+LDAPTLS_REQCERT=never ldapsearch -x -H ldaps://localhost:636/ -b "dc=example,dc=com"
+```
+</Step>
+
+</Steps>
+
+## Certificate Generation
+
+### Self-Signed Certificate (Testing)
+
+Use the provided script from `examples/mkcert.rb`:
+
+```ruby
+#!/usr/bin/env ruby
+require 'openssl'
+
+key = OpenSSL::PKey::RSA.new(1024) { print "."; $stdout.flush }
+puts
+
+cert = OpenSSL::X509::Certificate.new
+cert.version = 2
+cert.serial = 0
+name = OpenSSL::X509::Name.new([
+  ["C", "JP"],
+  ["O", "TEST"],
+  ["CN", "localhost"]
+])
+cert.subject = name
+cert.issuer = name
+cert.not_before = Time.now
+cert.not_after = Time.now + 3600  # 1 hour (extend for production)
+cert.public_key = key.public_key
+
+ef = OpenSSL::X509::ExtensionFactory.new(nil, cert)
+cert.extensions = [
+  ef.create_extension("basicConstraints", "CA:FALSE"),
+  ef.create_extension("subjectKeyIdentifier", "hash"),
+  ef.create_extension("extendedKeyUsage", "serverAuth"),
+  ef.create_extension("keyUsage", "keyEncipherment,dataEncipherment,digitalSignature")
+]
+ef.issuer_certificate = cert
+cert.add_extension(ef.create_extension("authorityKeyIdentifier", "keyid:always,issuer:always"))
+cert.sign(key, OpenSSL::Digest::SHA1.new)
+
+# Write to disk
+File.open("key.pem", "w", 0600) { |f| f << key.to_pem }
+File.open("cert.pem", "w", 0644) { |f| f << cert.to_pem }
+
+puts "Created key.pem and cert.pem"
+```
+
+Run it:
+
+```bash
+ruby mkcert.rb
+```
+
+<Warning>
+Self-signed certificates are only suitable for testing. For production, use certificates from a trusted Certificate Authority.
+</Warning>
+
+### Production Certificate (Certificate Authority)
+
+For production, obtain certificates from a CA like Let's Encrypt:
+
+```bash
+# Using certbot for Let's Encrypt
+sudo certbot certonly --standalone -d ldap.example.com
+
+# Certificates will be in:
+# /etc/letsencrypt/live/ldap.example.com/fullchain.pem
+# /etc/letsencrypt/live/ldap.example.com/privkey.pem
+```
+
+Configure the server:
+
+```ruby
+server = LDAP::Server.new(
+  port: 636,
+  ssl_cert_file: '/etc/letsencrypt/live/ldap.example.com/fullchain.pem',
+  ssl_key_file: '/etc/letsencrypt/live/ldap.example.com/privkey.pem',
+  ssl_on_connect: true
+)
+```
+
+### Generating with OpenSSL Command Line
+
+```bash
+# Generate private key
+openssl genrsa -out key.pem 2048
+
+# Generate certificate signing request
+openssl req -new -key key.pem -out cert.csr \
+  -subj "/C=US/ST=CA/O=MyCompany/CN=localhost"
+
+# Self-sign the certificate
+openssl x509 -req -days 365 -in cert.csr \
+  -signkey key.pem -out cert.pem
+
+# Clean up
+rm cert.csr
+```
+
+## Server Configuration
+
+### Basic SSL Configuration
+
+```ruby
+server = LDAP::Server.new(
+  port: 636,
+  ssl_key_file: 'key.pem',      # Private key
+  ssl_cert_file: 'cert.pem',    # Certificate
+  ssl_on_connect: true,         # LDAPS mode
+  router: my_router
+)
+```
+
+### SSL Options
+
+<CodeGroup>
+
+```ruby LDAPS (SSL on Connect)
+server = LDAP::Server.new(
+  port: 636,                    # Standard LDAPS port
+  ssl_key_file: 'key.pem',
+  ssl_cert_file: 'cert.pem',
+  ssl_on_connect: true          # SSL from connection start
+)
+```
+
+```ruby Plain LDAP
+server = LDAP::Server.new(
+  port: 389,                    # Standard LDAP port
+  # No SSL options - plain text
+)
+```
+
+```ruby With DH Parameters
+# For stronger security, provide DH parameters
+server = LDAP::Server.new(
+  port: 636,
+  ssl_key_file: 'key.pem',
+  ssl_cert_file: 'cert.pem',
+  ssl_dhparams: 'dhparams.pem',  # DH parameters file
+  ssl_on_connect: true
+)
+```
+
+</CodeGroup>
+
+### Client Certificate Verification
+
+Require and verify client certificates:
+
+```ruby
+server = LDAP::Server.new(
+  port: 636,
+  ssl_key_file: 'key.pem',
+  ssl_cert_file: 'cert.pem',
+  ssl_ca_path: '/path/to/ca/certs',  # CA certificates directory
+  ssl_verify_mode: OpenSSL::SSL::VERIFY_PEER | 
+                   OpenSSL::SSL::VERIFY_FAIL_IF_NO_PEER_CERT,
+  ssl_on_connect: true
+)
+```
+
+Verification modes:
+
+```ruby
+# Don't verify client certificates
+ssl_verify_mode: OpenSSL::SSL::VERIFY_NONE
+
+# Verify if provided (optional)
+ssl_verify_mode: OpenSSL::SSL::VERIFY_PEER
+
+# Require client certificate
+ssl_verify_mode: OpenSSL::SSL::VERIFY_PEER | 
+                 OpenSSL::SSL::VERIFY_FAIL_IF_NO_PEER_CERT
+```
+
+<Note>
+If `ssl_ca_path` is not specified, a warning will be logged and peer certificates won't be verified (even if verify_mode is set).
+</Note>
+
+## Complete SSL Examples
+
+### Example 1: Basic LDAPS Server
+
+```ruby
+#!/usr/bin/env ruby
+require 'ldap/server'
+require 'ldap/server/router'
+
+$logger = Logger.new($stderr)
+
+class LDAPController
+  def self.bind(request, version, dn, password, params)
+    $logger.info "Secure bind from #{dn}"
+    # Accept anonymous
+    return if dn.nil?
+    # Validate credentials
+  end
+
+  def self.search(request, baseObject, scope, deref, filter, params)
+    request.send_SearchResultEntry(
+      "cn=example,#{baseObject}",
+      {
+        'cn' => ['example'],
+        'description' => ['Secure LDAP server']
+      }
+    )
+  end
+end
+
+router = LDAP::Server::Router.new($logger) do
+  bind nil => "LDAPController#bind"
+  search "dc=example,dc=com" => "LDAPController#search"
+end
+
+server = LDAP::Server.new(
+  port: 636,
+  ssl_key_file: 'key.pem',
+  ssl_cert_file: 'cert.pem',
+  ssl_on_connect: true,
+  router: router,
+  logger: $logger
+)
+
+server.run_tcpserver
+server.join
+```
+
+### Example 2: Dual-Mode Server (Plain + SSL)
+
+Run both secure and insecure servers:
+
+```ruby
+#!/usr/bin/env ruby
+require 'ldap/server'
+require 'ldap/server/router'
+
+logger = Logger.new($stderr)
+
+router = LDAP::Server::Router.new(logger) do
+  bind nil => "LDAPController#bind"
+  search "dc=example,dc=com" => "LDAPController#search"
+end
+
+# Plain LDAP server on port 389
+plain_server = LDAP::Server.new(
+  port: 389,
+  router: router,
+  logger: logger
+)
+plain_server.run_tcpserver
+
+# Secure LDAPS server on port 636
+secure_server = LDAP::Server.new(
+  port: 636,
+  ssl_key_file: 'key.pem',
+  ssl_cert_file: 'cert.pem',
+  ssl_on_connect: true,
+  router: router,
+  logger: logger
+)
+secure_server.run_tcpserver
+
+# Handle shutdown
+trap 'INT' do
+  plain_server.stop
+  secure_server.stop
+end
+
+plain_server.join
+secure_server.join
+```
+
+Test both:
+
+```bash
+# Plain LDAP
+ldapsearch -x -H ldap://localhost:389/ -b "dc=example,dc=com"
+
+# Secure LDAPS
+LDAPTLS_REQCERT=never ldapsearch -x -H ldaps://localhost:636/ -b "dc=example,dc=com"
+```
+
+### Example 3: Client Certificate Authentication
+
+```ruby
+require 'ldap/server'
+require 'ldap/server/router'
+
+class SecureController
+  def self.bind(request, version, dn, password, params)
+    # Get client certificate from connection
+    # Note: Access to peer cert requires custom Connection implementation
+    logger.info "Authenticated via client certificate"
+  end
+end
+
+router = LDAP::Server::Router.new($logger) do
+  bind nil => "SecureController#bind"
+end
+
+server = LDAP::Server.new(
+  port: 636,
+  ssl_key_file: 'server-key.pem',
+  ssl_cert_file: 'server-cert.pem',
+  ssl_ca_path: '/etc/ssl/ca-certs',
+  ssl_verify_mode: OpenSSL::SSL::VERIFY_PEER |
+                   OpenSSL::SSL::VERIFY_FAIL_IF_NO_PEER_CERT,
+  ssl_on_connect: true,
+  router: router
+)
+
+server.run_tcpserver
+server.join
+```
+
+## Generating DH Parameters
+
+For enhanced security with ephemeral Diffie-Hellman key exchange:
+
+```bash
+# Generate DH parameters (takes several minutes)
+openssl dhparam -out dhparams.pem 2048
+```
+
+Use in server:
+
+```ruby
+server = LDAP::Server.new(
+  port: 636,
+  ssl_key_file: 'key.pem',
+  ssl_cert_file: 'cert.pem',
+  ssl_dhparams: 'dhparams.pem',
+  ssl_on_connect: true
+)
+```
+
+## Testing SSL Configuration
+
+### Using ldapsearch
+
+```bash
+# Basic LDAPS connection
+ldapsearch -x -H ldaps://localhost:636/ -b "dc=example,dc=com"
+
+# Disable certificate verification (testing only)
+LDAPTLS_REQCERT=never ldapsearch -x -H ldaps://localhost:636/ -b "dc=example,dc=com"
+
+# Specify CA certificate
+LDAPTLS_CACERT=/path/to/ca.pem ldapsearch -x -H ldaps://localhost:636/ -b "dc=example,dc=com"
+```
+
+### Using OpenSSL s_client
+
+Test the SSL/TLS connection directly:
+
+```bash
+# Test SSL connection
+openssl s_client -connect localhost:636 -showcerts
+
+# Test with specific CA
+openssl s_client -connect localhost:636 -CAfile ca.pem
+
+# Check certificate details
+openssl s_client -connect localhost:636 -showcerts </dev/null 2>/dev/null | openssl x509 -noout -text
+```
+
+### Using Ruby
+
+```ruby
+require 'ldap'
+
+conn = LDAP::SSLConn.new('localhost', 636)
+conn.set_option(LDAP::LDAP_OPT_PROTOCOL_VERSION, 3)
+
+begin
+  conn.bind('cn=admin,dc=example,dc=com', 'password')
+  puts "Connected successfully!"
+  
+  conn.search('dc=example,dc=com', LDAP::LDAP_SCOPE_BASE, '(objectclass=*)') do |entry|
+    puts entry.inspect
+  end
+rescue LDAP::ResultError => e
+  puts "Error: #{e.message}"
+ensure
+  conn.unbind
+end
+```
+
+## Common Issues
+
+### Certificate Verification Failures
+
+<Warning>
+Clients may reject self-signed certificates. For testing, disable verification or add the certificate to the client's trust store.
+</Warning>
+
+```bash
+# Disable verification (testing only)
+LDAPTLS_REQCERT=never ldapsearch ...
+
+# Or add certificate to trust store
+sudo cp cert.pem /etc/ssl/certs/
+sudo update-ca-certificates  # Debian/Ubuntu
+```
+
+### Hostname Mismatch
+
+The certificate CN (Common Name) must match the hostname:
+
+```bash
+# If CN=localhost, must connect to localhost:
+ldapsearch -x -H ldaps://localhost:636/ ...
+
+# Connecting to 127.0.0.1 will fail with CN mismatch
+```
+
+Generate certificates with correct hostname:
+
+```ruby
+name = OpenSSL::X509::Name.new([
+  ["CN", "ldap.example.com"]  # Match your hostname
+])
+```
+
+### Permission Errors
+
+Ensure key file has correct permissions:
+
+```bash
+chmod 600 key.pem
+chmod 644 cert.pem
+```
+
+## Security Best Practices
+
+<CardGroup cols={2}>
+<Card title="Use Strong Keys" icon="key">
+Generate RSA keys of at least 2048 bits (4096 for high security)
+</Card>
+
+<Card title="Valid Certificates" icon="certificate">
+Use CA-signed certificates for production, not self-signed
+</Card>
+
+<Card title="Secure Storage" icon="lock">
+Protect private keys with file permissions (600) and secure storage
+</Card>
+
+<Card title="Regular Updates" icon="rotate">
+Rotate certificates before expiration and update ciphers regularly
+</Card>
+</CardGroup>
+
+### Recommended Configuration
+
+```ruby
+server = LDAP::Server.new(
+  port: 636,
+  ssl_key_file: '/etc/ldap/private/key.pem',
+  ssl_cert_file: '/etc/ldap/certs/cert.pem',
+  ssl_dhparams: '/etc/ldap/private/dhparams.pem',
+  ssl_on_connect: true,
+  ssl_ca_path: '/etc/ssl/certs',  # For client cert verification
+  ssl_verify_mode: OpenSSL::SSL::VERIFY_PEER  # Verify clients if needed
+)
+```
+
+## LDAP vs LDAPS
+
+| Feature | LDAP (port 389) | LDAPS (port 636) |
+|---------|-----------------|------------------|
+| Encryption | None | SSL/TLS |
+| StartTLS | Supported* | N/A |
+| Port | 389 | 636 |
+| Configuration | No SSL options | Requires certificates |
+| Use Case | Internal networks | Public/untrusted networks |
+
+<Note>
+*StartTLS (upgrade plain LDAP to TLS) is not currently implemented in ruby-ldapserver. Use LDAPS for encrypted connections.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+<Card title="Building Server" icon="server" href="/guides/building-server">
+Integrate SSL/TLS into your server configuration
+</Card>
+
+<Card title="Performance" icon="gauge-high" href="/guides/performance">
+Optimize SSL/TLS performance for production
+</Card>
+</CardGroup>

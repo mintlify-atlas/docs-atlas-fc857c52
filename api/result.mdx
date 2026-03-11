@@ -1,0 +1,467 @@
+---
+title: "LDAP::Server::Result Classes"
+description: "LDAP result codes and error handling"
+---
+
+The result classes provide LDAP protocol result codes as Ruby exceptions, allowing operations to signal success or failure using standard LDAP result codes.
+
+## Overview
+
+The `LDAP` module defines exception classes for LDAP operations:
+
+- `LDAP::Error` - Base error class (compatible with ruby-ldap)
+- `LDAP::ResultError` - Base class for all LDAP result code exceptions
+- `LDAP::Abandon` - Special exception for abandoning operations
+
+Each result code from RFC 2251 section 4.1.10 is represented as a subclass of `LDAP::ResultError`.
+
+## Exception Classes
+
+### LDAP::Error
+
+Base exception class, compatible with the ruby-ldap library.
+
+```ruby
+begin
+  # LDAP operation
+rescue LDAP::Error => e
+  # Catches all LDAP-related errors
+end
+```
+
+### LDAP::ResultError
+
+Base class for all LDAP result code exceptions. Each subclass represents a specific LDAP result code and implements `to_i` to return its numeric code.
+
+```ruby
+begin
+  raise LDAP::ResultError::NoSuchObject
+rescue LDAP::ResultError => e
+  puts "LDAP error #{e.to_i}: #{e.message}"
+end
+```
+
+#### Reverse Lookup
+
+Look up an exception class by its numeric result code:
+
+```ruby
+exception_class = LDAP::ResultError[53]
+# => LDAP::ResultError::UnwillingToPerform
+
+raise exception_class, "Server is in read-only mode"
+```
+
+<Note>
+The reverse lookup mapping (N_TO_CLASS) is incomplete in the source. It currently only includes code 53. Other codes will return the base `LDAP::ResultError` class.
+</Note>
+
+### LDAP::Abandon
+
+Special exception (subclass of `Interrupt`) raised when an operation thread needs to be terminated due to:
+- Receiving an `abandonRequest` from the client
+- Receiving a `bindRequest` (which implicitly abandons all pending operations)
+
+```ruby
+begin
+  # Long-running LDAP operation
+  perform_search
+rescue LDAP::Abandon
+  # Clean up and exit gracefully
+  cleanup_resources
+end
+```
+
+## Result Code Classes
+
+All result code classes inherit from `LDAP::ResultError` and implement `to_i` to return their numeric code.
+
+### Success Codes
+
+#### LDAP::ResultError::Success (0)
+
+The operation completed successfully.
+
+```ruby
+raise LDAP::ResultError::Success  # Not typically raised, but can signal success
+```
+
+#### LDAP::ResultError::CompareFalse (5)
+
+The compare operation returned false.
+
+```ruby
+raise LDAP::ResultError::CompareFalse
+```
+
+#### LDAP::ResultError::CompareTrue (6)
+
+The compare operation returned true.
+
+```ruby
+raise LDAP::ResultError::CompareTrue
+```
+
+### Operational Errors (1-4)
+
+#### LDAP::ResultError::OperationsError (1)
+
+A server-side error occurred during the operation.
+
+```ruby
+raise LDAP::ResultError::OperationsError, "Internal server error"
+```
+
+#### LDAP::ResultError::ProtocolError (2)
+
+The client sent a malformed or invalid request.
+
+```ruby
+raise LDAP::ResultError::ProtocolError, "Invalid ASN.1 encoding"
+```
+
+#### LDAP::ResultError::TimeLimitExceeded (3)
+
+The operation exceeded the time limit.
+
+```ruby
+raise LDAP::ResultError::TimeLimitExceeded
+```
+
+#### LDAP::ResultError::SizeLimitExceeded (4)
+
+The search operation exceeded the size limit.
+
+```ruby
+raise LDAP::ResultError::SizeLimitExceeded
+```
+
+### Authentication Errors (7-8, 14, 48-49)
+
+#### LDAP::ResultError::AuthMethodNotSupported (7)
+
+The requested authentication method is not supported.
+
+```ruby
+raise LDAP::ResultError::AuthMethodNotSupported, "SASL GSSAPI not available"
+```
+
+#### LDAP::ResultError::StrongAuthRequired (8)
+
+The operation requires strong authentication.
+
+```ruby
+raise LDAP::ResultError::StrongAuthRequired
+```
+
+#### LDAP::ResultError::SaslBindInProgress (14)
+
+SASL bind multi-step authentication is in progress.
+
+```ruby
+raise LDAP::ResultError::SaslBindInProgress
+```
+
+#### LDAP::ResultError::InappropriateAuthentication (48)
+
+The authentication method is inappropriate for the operation.
+
+```ruby
+raise LDAP::ResultError::InappropriateAuthentication
+```
+
+#### LDAP::ResultError::InvalidCredentials (49)
+
+The provided credentials are invalid.
+
+```ruby
+raise LDAP::ResultError::InvalidCredentials, "Wrong password"
+```
+
+### Referral and Limits (10-13)
+
+#### LDAP::ResultError::Referral (10)
+
+The operation should be referred to another server.
+
+```ruby
+raise LDAP::ResultError::Referral
+```
+
+#### LDAP::ResultError::AdminLimitExceeded (11)
+
+An administrative limit was exceeded.
+
+```ruby
+raise LDAP::ResultError::AdminLimitExceeded
+```
+
+#### LDAP::ResultError::UnavailableCriticalExtension (12)
+
+A critical extension is not available.
+
+```ruby
+raise LDAP::ResultError::UnavailableCriticalExtension
+```
+
+#### LDAP::ResultError::ConfidentialityRequired (13)
+
+The operation requires a confidential connection (e.g., TLS).
+
+```ruby
+raise LDAP::ResultError::ConfidentialityRequired
+```
+
+### Attribute Errors (16-21)
+
+#### LDAP::ResultError::NoSuchAttribute (16)
+
+The specified attribute does not exist in the entry.
+
+```ruby
+raise LDAP::ResultError::NoSuchAttribute, "Attribute 'mail' not found"
+```
+
+#### LDAP::ResultError::UndefinedAttributeType (17)
+
+The attribute type is not defined in the schema.
+
+```ruby
+raise LDAP::ResultError::UndefinedAttributeType, "Unknown attribute: customField"
+```
+
+#### LDAP::ResultError::InappropriateMatching (18)
+
+The matching rule is inappropriate for the attribute.
+
+```ruby
+raise LDAP::ResultError::InappropriateMatching
+```
+
+#### LDAP::ResultError::ConstraintViolation (19)
+
+The operation would violate a constraint.
+
+```ruby
+raise LDAP::ResultError::ConstraintViolation, "Value too long"
+```
+
+#### LDAP::ResultError::AttributeOrValueExists (20)
+
+The attribute or value already exists.
+
+```ruby
+raise LDAP::ResultError::AttributeOrValueExists, "uid must be unique"
+```
+
+#### LDAP::ResultError::InvalidAttributeSyntax (21)
+
+The attribute value has invalid syntax.
+
+```ruby
+raise LDAP::ResultError::InvalidAttributeSyntax, "Invalid email format"
+```
+
+### Entry and DN Errors (32-36)
+
+#### LDAP::ResultError::NoSuchObject (32)
+
+The specified entry does not exist.
+
+```ruby
+raise LDAP::ResultError::NoSuchObject, "Entry not found: uid=jdoe,ou=Users,dc=example,dc=com"
+```
+
+#### LDAP::ResultError::AliasProblem (33)
+
+A problem occurred while dereferencing an alias.
+
+```ruby
+raise LDAP::ResultError::AliasProblem
+```
+
+#### LDAP::ResultError::InvalidDNSyntax (34)
+
+The DN syntax is invalid.
+
+```ruby
+raise LDAP::ResultError::InvalidDNSyntax, "Malformed DN"
+```
+
+#### LDAP::ResultError::IsLeaf (35)
+
+The entry is a leaf and cannot have subordinates.
+
+```ruby
+raise LDAP::ResultError::IsLeaf
+```
+
+#### LDAP::ResultError::AliasDereferencingProblem (36)
+
+A problem occurred during alias dereferencing.
+
+```ruby
+raise LDAP::ResultError::AliasDereferencingProblem
+```
+
+### Authorization Errors (50)
+
+#### LDAP::ResultError::InsufficientAccessRights (50)
+
+The user lacks permission to perform the operation.
+
+```ruby
+raise LDAP::ResultError::InsufficientAccessRights, "Read access denied"
+```
+
+### Server State Errors (51-54)
+
+#### LDAP::ResultError::Busy (51)
+
+The server is too busy to process the request.
+
+```ruby
+raise LDAP::ResultError::Busy
+```
+
+#### LDAP::ResultError::Unavailable (52)
+
+The server is unavailable.
+
+```ruby
+raise LDAP::ResultError::Unavailable
+```
+
+#### LDAP::ResultError::UnwillingToPerform (53)
+
+The server is unwilling to perform the operation.
+
+```ruby
+raise LDAP::ResultError::UnwillingToPerform, "Server is in read-only mode"
+```
+
+#### LDAP::ResultError::LoopDetect (54)
+
+A loop was detected (e.g., in alias dereferencing).
+
+```ruby
+raise LDAP::ResultError::LoopDetect
+```
+
+### Naming Violations (64-69)
+
+#### LDAP::ResultError::NamingViolation (64)
+
+The naming violates constraints.
+
+```ruby
+raise LDAP::ResultError::NamingViolation
+```
+
+#### LDAP::ResultError::ObjectClassViolation (65)
+
+The entry violates object class constraints.
+
+```ruby
+raise LDAP::ResultError::ObjectClassViolation, "Missing required attribute 'cn'"
+```
+
+#### LDAP::ResultError::NotAllowedOnNonLeaf (66)
+
+The operation is not allowed on a non-leaf entry.
+
+```ruby
+raise LDAP::ResultError::NotAllowedOnNonLeaf
+```
+
+#### LDAP::ResultError::NotAllowedOnRDN (67)
+
+The operation is not allowed on an RDN attribute.
+
+```ruby
+raise LDAP::ResultError::NotAllowedOnRDN
+```
+
+#### LDAP::ResultError::EntryAlreadyExists (68)
+
+The entry already exists.
+
+```ruby
+raise LDAP::ResultError::EntryAlreadyExists, "uid=jdoe already exists"
+```
+
+#### LDAP::ResultError::ObjectClassModsProhibited (69)
+
+Modifying the object class is prohibited.
+
+```ruby
+raise LDAP::ResultError::ObjectClassModsProhibited
+```
+
+### Other Errors
+
+#### LDAP::ResultError::AffectsMultipleDSAs (71)
+
+The operation affects multiple DSAs (directory servers).
+
+```ruby
+raise LDAP::ResultError::AffectsMultipleDSAs
+```
+
+#### LDAP::ResultError::Other (80)
+
+A generic error occurred.
+
+```ruby
+raise LDAP::ResultError::Other, "An unexpected error occurred"
+```
+
+## Usage Examples
+
+### Raising Result Exceptions
+
+```ruby
+class MyLDAPServer < LDAP::Server
+  def search(basedn, scope, filter, attrs)
+    unless entry_exists?(basedn)
+      raise LDAP::ResultError::NoSuchObject, "Base DN not found: #{basedn}"
+    end
+    
+    unless authorized?(basedn, :read)
+      raise LDAP::ResultError::InsufficientAccessRights
+    end
+    
+    # Perform search...
+  end
+end
+```
+
+### Handling Result Exceptions
+
+```ruby
+begin
+  server.add_entry(dn, attributes)
+rescue LDAP::ResultError::EntryAlreadyExists
+  # Handle duplicate entry
+  puts "Entry already exists, updating instead..."
+  server.modify_entry(dn, attributes)
+rescue LDAP::ResultError::InsufficientAccessRights
+  # Handle permission denied
+  puts "Access denied"
+rescue LDAP::ResultError => e
+  # Handle any other LDAP error
+  puts "LDAP error #{e.to_i}: #{e.message}"
+end
+```
+
+### Getting Result Codes
+
+```ruby
+error = LDAP::ResultError::InvalidCredentials.new("Wrong password")
+error.to_i  # => 49
+```
+
+## See Also
+
+- [Operation](/api/operation) - LDAP operation handling that uses result codes
+- [Server](/api/server) - Server class that raises result exceptions

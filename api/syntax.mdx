@@ -1,0 +1,435 @@
+---
+title: "LDAP::Server::Syntax"
+description: "LDAP attribute syntax validation and type handling"
+---
+
+The `LDAP::Server::Syntax` class describes LDAP attribute syntaxes, providing validation, parsing, and type conversion for LDAP attribute values.
+
+## Overview
+
+The Syntax class maintains a global pool of syntax definitions based on RFC 2252 and provides methods for:
+- Validating attribute values against syntax rules
+- Converting between string and Ruby representations
+- Parsing syntax description strings
+- Checking if a syntax is human-readable or requires binary encoding
+
+## Constructor
+
+### new(oid, desc = nil, opt = {}, &blk)
+
+Creates a new Syntax object.
+
+<ParamField path="oid" type="String" required>
+  The OID (Object Identifier) of the syntax (e.g., "1.3.6.1.4.1.1466.115.121.1.15")
+</ParamField>
+
+<ParamField path="desc" type="String">
+  Human-readable description of the syntax (e.g., "Directory String")
+</ParamField>
+
+<ParamField path="opt" type="Hash">
+  Options hash supporting:
+  - `:nhr` (Boolean) - Not human-readable flag
+  - `:binary` (Boolean) - Binary encoding required flag
+  - `:re` (Regexp) - Regular expression for value validation
+</ParamField>
+
+<ParamField path="blk" type="Block">
+  Optional block to define custom methods (evaluated in the context of the Syntax instance)
+</ParamField>
+
+```ruby
+syntax = LDAP::Server::Syntax.new(
+  "1.3.6.1.4.1.1466.115.121.1.27",
+  "Integer",
+  re: /\A\d+\z/
+) do
+  def value_from_s(v)
+    v.to_i
+  end
+end
+```
+
+## Class Methods
+
+### from_def(str, &blk)
+
+Creates a new Syntax object from an LDAP syntax description string.
+
+<ParamField path="str" type="String" required>
+  LDAP syntax description string (RFC 2252 format)
+</ParamField>
+
+<ParamField path="blk" type="Block">
+  Optional block to define custom methods
+</ParamField>
+
+**Returns:** Syntax object
+
+**Raises:** `LDAP::ResultError::InvalidAttributeSyntax` if the description string is invalid
+
+```ruby
+syntax = LDAP::Server::Syntax.from_def(
+  "( 1.3.6.1.4.1.1466.115.121.1.27 DESC 'Integer' )"
+)
+```
+
+### add(*args, &blk)
+
+Creates a new syntax and adds it to the global syntax pool.
+
+<ParamField path="args" type="Array">
+  Arguments passed to `new`
+</ParamField>
+
+<ParamField path="blk" type="Block">
+  Optional block to define custom methods
+</ParamField>
+
+**Returns:** Syntax object
+
+```ruby
+LDAP::Server::Syntax.add(
+  "1.3.6.1.4.1.1466.115.121.1.27",
+  "Integer",
+  re: /\A\d+\z/
+)
+```
+
+### find(oid)
+
+Finds a syntax object by OID. If not found, creates and registers a new empty syntax.
+
+<ParamField path="oid" type="String or Syntax">
+  OID string or Syntax object. Returns nil if oid is nil, or the object itself if already a Syntax.
+</ParamField>
+
+**Returns:** Syntax object or nil
+
+```ruby
+syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.15")
+# => #<LDAP::Server::Syntax @oid="1.3.6.1.4.1.1466.115.121.1.15", @desc="Directory String">
+```
+
+### all_syntaxes
+
+Returns all registered syntax objects.
+
+**Returns:** Array of Syntax objects
+
+```ruby
+syntaxes = LDAP::Server::Syntax.all_syntaxes
+syntaxes.each { |s| puts "#{s.oid}: #{s.desc}" }
+```
+
+## Instance Methods
+
+### oid
+
+Returns the OID of the syntax.
+
+**Returns:** String
+
+```ruby
+syntax.oid  # => "1.3.6.1.4.1.1466.115.121.1.15"
+```
+
+### desc
+
+Returns the human-readable description.
+
+**Returns:** String or nil
+
+```ruby
+syntax.desc  # => "Directory String"
+```
+
+### nhr
+
+Returns true if the syntax is not human-readable (binary data).
+
+**Returns:** Boolean or nil
+
+```ruby
+syntax.nhr  # => true (for Certificate syntax)
+```
+
+### binary
+
+Returns true if binary transfer encoding is required.
+
+**Returns:** Boolean or nil
+
+```ruby
+syntax.binary  # => true (for JPEG syntax)
+```
+
+### to_s
+
+Returns the OID as a string.
+
+**Returns:** String
+
+```ruby
+syntax.to_s  # => "1.3.6.1.4.1.1466.115.121.1.15"
+```
+
+### to_def
+
+Converts the syntax object to its LDAP description string.
+
+**Returns:** String - RFC 2252 format syntax description
+
+```ruby
+syntax.to_def
+# => "( 1.3.6.1.4.1.1466.115.121.1.15 DESC 'Directory String' )"
+```
+
+### match(val)
+
+Validates a value against the syntax's regular expression.
+
+<ParamField path="val" type="String or Object" required>
+  The value to validate
+</ParamField>
+
+**Returns:** true or MatchData if valid, nil or false if invalid
+
+```ruby
+integer_syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.27")
+integer_syntax.match("123")   # => true or MatchData
+integer_syntax.match("abc")   # => nil
+```
+
+### value_to_s(val)
+
+Converts a value to its canonical string representation for this syntax.
+
+<ParamField path="val" type="Object" required>
+  The value to convert
+</ParamField>
+
+**Returns:** String
+
+```ruby
+boolean_syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.7")
+boolean_syntax.value_to_s(true)   # => "TRUE"
+boolean_syntax.value_to_s(false)  # => "FALSE"
+```
+
+### value_from_s(val)
+
+Converts a string value to a Ruby representation for this syntax.
+
+<ParamField path="val" type="String" required>
+  The string value to parse
+</ParamField>
+
+**Returns:** Object - Ruby representation of the value
+
+```ruby
+integer_syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.27")
+integer_syntax.value_from_s("123")  # => 123
+
+boolean_syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.7")
+boolean_syntax.value_from_s("TRUE")  # => true
+```
+
+## Built-in Syntaxes
+
+The library includes pre-defined syntaxes from RFC 2252 section 6 ("SHOULD support"):
+
+### Common Syntaxes
+
+#### Directory String (1.3.6.1.4.1.1466.115.121.1.15)
+General UTF-8 string for most text attributes.
+
+```ruby
+syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.15")
+```
+
+#### Distinguished Name (1.3.6.1.4.1.1466.115.121.1.12)
+LDAP Distinguished Name format.
+
+```ruby
+syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.12")
+```
+
+#### Integer (1.3.6.1.4.1.1466.115.121.1.27)
+Integer values. Custom `value_from_s` converts to Ruby Integer.
+
+```ruby
+syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.27")
+syntax.match("123")         # => MatchData
+syntax.value_from_s("456")  # => 456
+```
+
+#### Boolean (1.3.6.1.4.1.1466.115.121.1.7)
+Boolean values ("TRUE" or "FALSE"). Custom methods for Ruby boolean conversion.
+
+```ruby
+syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.7")
+syntax.value_to_s(true)       # => "TRUE"
+syntax.value_from_s("FALSE")  # => false
+```
+
+#### IA5 String (1.3.6.1.4.1.1466.115.121.1.26)
+ASCII string format (commonly used for email addresses).
+
+```ruby
+syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.26")
+```
+
+### Binary Syntaxes
+
+These syntaxes have `nhr: true` (not human-readable) or `binary: true`:
+
+#### Binary (1.3.6.1.4.1.1466.115.121.1.5)
+Raw binary data.
+
+```ruby
+syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.5")
+syntax.nhr  # => true
+```
+
+#### Certificate (1.3.6.1.4.1.1466.115.121.1.8)
+X.509 certificate, binary encoded.
+
+```ruby
+syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.8")
+syntax.binary  # => true
+syntax.nhr     # => true
+```
+
+#### JPEG (1.3.6.1.4.1.1466.115.121.1.28)
+JPEG image data.
+
+```ruby
+syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.28")
+syntax.nhr  # => true
+```
+
+### Schema Description Syntaxes
+
+#### Attribute Type Description (1.3.6.1.4.1.1466.115.121.1.3)
+Defines LDAP attribute types. Includes complex regex for parsing.
+
+```ruby
+syntax = LDAP::Server::Syntax::AttributeTypeDescription
+```
+
+#### Object Class Description (1.3.6.1.4.1.1466.115.121.1.37)
+Defines LDAP object classes.
+
+```ruby
+syntax = LDAP::Server::Syntax::ObjectClassDescription
+```
+
+#### Matching Rule Description (1.3.6.1.4.1.1466.115.121.1.30)
+Defines matching rules.
+
+```ruby
+syntax = LDAP::Server::Syntax::MatchingRuleDescription
+```
+
+#### LDAP Syntax Description (1.3.6.1.4.1.1466.115.121.1.54)
+Defines LDAP syntaxes (used by `from_def`).
+
+```ruby
+syntax = LDAP::Server::Syntax::LDAPSyntaxDescription
+```
+
+### Other Syntaxes
+
+- **Bit String** (1.3.6.1.4.1.1466.115.121.1.6): `'01010'B` format
+- **Country String** (1.3.6.1.4.1.1466.115.121.1.11): Two-letter country codes
+- **Numeric String** (1.3.6.1.4.1.1466.115.121.1.36): Digits only
+- **OID** (1.3.6.1.4.1.1466.115.121.1.38): Object Identifier
+- **Postal Address** (1.3.6.1.4.1.1466.115.121.1.41): Multi-line addresses ("$"-separated)
+- **Telephone Number** (1.3.6.1.4.1.1466.115.121.1.50): Phone number format
+- **Generalized Time** (1.3.6.1.4.1.1466.115.121.1.24): Timestamp format
+- **UTC Time** (1.3.6.1.4.1.1466.115.121.1.53): UTC timestamp
+
+## Syntax Constants
+
+The class defines regex patterns for parsing schema definitions:
+
+```ruby
+KEYSTR = "[a-zA-Z][a-zA-Z0-9;-]*"
+NUMERICOID = "( \\d[\\d.]+\\d )"
+WOID = "\\s* ( #{KEYSTR} | \\d[\\d.]+\\d ) \\s*"
+OIDS = # Pattern for multiple OIDs
+QDESCRS = # Pattern for quoted descriptors
+QDSTRING = # Pattern for quoted strings
+NOIDLEN = # Pattern for OID with optional length
+ATTRIBUTEUSAGE = # Pattern for attribute usage
+```
+
+These are used internally for parsing schema description strings.
+
+## Examples
+
+### Validating Attribute Values
+
+```ruby
+integer_syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.27")
+
+if integer_syntax.match("123")
+  puts "Valid integer"
+else
+  puts "Invalid integer"
+end
+```
+
+### Creating a Custom Syntax
+
+```ruby
+LDAP::Server::Syntax.add(
+  "1.3.6.1.4.1.9999.1.1",
+  "Email Address",
+  re: /\A[\w.+-]+@[\w.-]+\.[a-z]{2,}\z/i
+) do
+  def value_to_s(v)
+    v.to_s.downcase
+  end
+end
+
+email_syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.9999.1.1")
+email_syntax.match("user@example.com")  # => MatchData
+email_syntax.value_to_s("USER@EXAMPLE.COM")  # => "user@example.com"
+```
+
+### Working with Binary Data
+
+```ruby
+jpeg_syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.28")
+
+if jpeg_syntax.nhr
+  puts "This is binary data, not human-readable"
+end
+
+if jpeg_syntax.binary
+  puts "Binary transfer encoding required"
+end
+```
+
+### Parsing Postal Addresses
+
+```ruby
+postal_syntax = LDAP::Server::Syntax.find("1.3.6.1.4.1.1466.115.121.1.41")
+
+# Convert from array to LDAP string
+address = ["123 Main St", "Suite 100", "San Francisco, CA 94102"]
+ldap_value = postal_syntax.value_to_s(address)
+# => "123 Main St$Suite 100$San Francisco, CA 94102"
+
+# Convert from LDAP string to array
+parsed = postal_syntax.value_from_s(ldap_value)
+# => ["123 Main St", "Suite 100", "San Francisco, CA 94102"]
+```
+
+## See Also
+
+- [Schema](/api/schema) - Schema management and attribute type definitions
+- [AttributeType](/api/attribute-types) - Attribute type definitions that use syntaxes
+- [Filter](/api/filter) - Filter parsing and matching

@@ -1,0 +1,506 @@
+---
+title: Router
+description: Modern request routing with parameterized DN matching and controller actions
+---
+
+## Overview
+
+The `LDAP::Server::Router` class provides a modern, Rails-like approach to routing LDAP requests. Instead of subclassing Operation, you define routes that map Distinguished Names to controller class methods.
+
+See `lib/ldap/server/router.rb:9`
+
+## Why Use the Router?
+
+The Router pattern offers several advantages over the legacy Operation class:
+
+✅ **Separation of Concerns** - Different DNs route to different controllers  
+✅ **Parameterized Routing** - Extract variables from DNs (e.g., `:username`)  
+✅ **Cleaner Code** - More maintainable for complex servers  
+✅ **Flexible Dispatch** - Different base DNs can use different logic  
+
+<Note>
+From the README: "The request router is a simple mapping of potentially parameterized routes (DNs) and actions to a controller action, allowing for simple, flexible and maintainable code."
+</Note>
+
+## Creating a Router
+
+Define routes in a block passed to the Router constructor:
+
+From `examples/rbslapd5.rb:36`:
+
+```ruby
+router = LDAP::Server::Router.new(logger) do
+  bind nil => "LDAPController#bind"
+  
+  search "ou=Users,dc=mydomain,dc=com" => "LDAPController#search"
+  search "ou=Groups,dc=mydomain,dc=com" => "GroupController#search"
+end
+
+server = LDAP::Server.new(
+  port: 1389,
+  router: router
+)
+```
+
+<Info>
+Specifying a `:router` in server options always overrides `:operation_class` (see `lib/ldap/server/server.rb:36`).
+</Info>
+
+## Route Syntax
+
+Routes map LDAP operations and DNs to controller actions:
+
+```ruby
+router = LDAP::Server::Router.new(logger) do
+  # operation "dn" => "ClassName#method_name"
+  
+  bind nil => "AuthController#simple_bind"
+  search "ou=Users,dc=example,dc=com" => "UserController#search"
+  add "ou=Users,dc=example,dc=com" => "UserController#add"
+  modify "ou=Users,dc=example,dc=com" => "UserController#modify"
+  del "ou=Users,dc=example,dc=com" => "UserController#delete"
+  modifydn "ou=Users,dc=example,dc=com" => "UserController#rename"
+  compare "ou=Users,dc=example,dc=com" => "UserController#compare"
+end
+```
+
+### Supported Operations
+
+From `lib/ldap/server/router.rb:58`:
+
+- `bind` - Authentication requests
+- `search` - Search/query requests
+- `add` - Create entry requests
+- `modify` - Update entry requests
+- `del` - Delete entry requests
+- `modifydn` - Rename/move entry requests
+- `compare` - Compare attribute value requests
+
+## Parameterized Routes
+
+Extract variables from DNs using `:parameter` syntax:
+
+```ruby
+router = LDAP::Server::Router.new(logger) do
+  search "uid=:username,ou=Users,dc=example,dc=com" => "UserController#get_user"
+  search "cn=:groupname,ou=Groups,dc=example,dc=com" => "GroupController#get_group"
+end
+
+class UserController
+  def self.get_user(request, basedn, scope, deref, filter, params)
+    username = params[:username]  # Extracted from DN!
+    user = Database.find_user(username)
+    
+    if user
+      request.send_SearchResultEntry(basedn, user.to_ldap_attributes)
+    end
+  end
+end
+```
+
+The router uses a Trie data structure (see `lib/ldap/server/trie.rb`) to match DNs and extract parameters.
+
+### Parameter Matching
+
+From `lib/ldap/server/trie.rb:63`:
+
+```ruby
+if key.values.first.start_with?(':') or key.values.first == component.values.first
+  return value.lookup dn
+end
+```
+
+Parameters (starting with `:`) match any value in that DN component.
+
+## Controller Class Methods
+
+Controller methods are **class methods** (not instance methods) with specific signatures:
+
+### Bind Handler
+
+From `lib/ldap/server/router.rb:198`:
+
+```ruby
+def self.simple_bind(request, version, dn, password, params)
+  if version != 3
+    raise LDAP::ResultError::ProtocolError, "version 3 only"
+  end
+  
+  # Authenticate user
+  user = UserDatabase.authenticate(dn, password)
+  unless user
+    raise LDAP::ResultError::InvalidCredentials
+  end
+  
+  # Bind accepted - no return needed
+end
+```
+
+**Parameters:**
+- `request` - `LDAP::Server::Request` object for sending responses
+- `version` - LDAP protocol version
+- `dn` - Distinguished name to bind as (nil for anonymous)
+- `password` - Password credential
+- `params` - Hash of extracted route parameters
+
+### Search Handler
+
+From `lib/ldap/server/router.rb:214`:
+
+```ruby
+def self.search(request, baseObject, scope, deref, filter, params)
+  # Access route parameters
+  username = params[:username] if params
+  
+  # Send results
+  request.send_SearchResultEntry(dn, attributes)
+  request.send_SearchResultEntry(dn2, attributes2)
+  # ...
+  
+  # Response sent automatically - don't send here
+end
+```
+
+**Parameters:**
+- `request` - Request object
+- `baseObject` - Base DN for search
+- `scope` - `LDAP::Server::BaseObject`, `SingleLevel`, or `WholeSubtree`
+- `deref` - Alias dereferencing mode
+- `filter` - Parsed filter object
+- `params` - Hash of extracted route parameters
+
+### Add Handler
+
+```ruby
+def self.add(request, dn, attributes, params)
+  # Create entry
+  Database.create_entry(dn, attributes)
+  
+  # Response sent automatically
+end
+```
+
+**Parameters:**
+- `request` - Request object
+- `dn` - DN for new entry
+- `attributes` - Hash of `{"attr" => ["val1", "val2"], ...}`
+- `params` - Route parameters
+
+### Modify Handler
+
+```ruby
+def self.modify(request, dn, modifications, params)
+  # Process modifications
+  entry = Database.find(dn)
+  modifications.each do |attr, values|
+    operation = values.shift  # :add, :delete, or :replace
+    case operation
+    when :add
+      entry[attr] += values
+    when :delete
+      values.empty? ? entry.delete(attr) : entry[attr] -= values
+    when :replace
+      entry[attr] = values
+    end
+  end
+  entry.save
+end
+```
+
+**Parameters:**
+- `request` - Request object
+- `dn` - DN to modify
+- `modifications` - Hash of modifications
+- `params` - Route parameters
+
+### Delete Handler
+
+```ruby
+def self.delete(request, dn, params)
+  Database.delete_entry(dn)
+end
+```
+
+### ModifyDN Handler
+
+```ruby
+def self.rename(request, entry, newrdn, deleteoldrdn, newSuperior, params)
+  Database.rename_entry(entry, newrdn, deleteoldrdn, newSuperior)
+end
+```
+
+### Compare Handler
+
+```ruby
+def self.compare(request, entry, attr, value, params)
+  record = Database.find(entry)
+  
+  # Return true or false
+  record[attr].include?(value)
+end
+```
+
+## The Request Object
+
+The `LDAP::Server::Request` class (see `lib/ldap/server/request.rb:6`) provides methods to send responses:
+
+### send_SearchResultEntry
+
+From `lib/ldap/server/request.rb:67`:
+
+```ruby
+request.send_SearchResultEntry(dn, avs, opt={})
+```
+
+**Example:**
+
+```ruby
+def self.search(request, baseObject, scope, deref, filter, params)
+  users = Database.search_users(baseObject, scope)
+  
+  users.each do |user|
+    attributes = {
+      "uid" => user.username,
+      "cn" => user.full_name,
+      "mail" => user.emails,  # Can be array
+      "objectClass" => ["person", "inetOrgPerson"]
+    }
+    request.send_SearchResultEntry(user.dn, attributes)
+  end
+end
+```
+
+### Access Request Properties
+
+```ruby
+def self.search(request, baseObject, scope, deref, filter, params)
+  # Access connection state
+  current_user = request.connection.binddn
+  
+  # Access request attributes
+  requested_attrs = request.attributes
+  types_only = request.typesOnly
+  size_limit = request.sizelimit
+  
+  # Result count is tracked automatically
+  result_count = request.rescount
+end
+```
+
+## Route Resolution
+
+The router uses a Trie (prefix tree) to efficiently match DNs to routes.
+
+From `lib/ldap/server/router.rb:70`:
+
+```ruby
+def parse_route(dn, method)
+  route, action = @routes.match("#{dn},op=#{method.to_s}")
+  if not route or route.empty?
+    @logger.warn "No route defined for '#{route}'"
+    raise LDAP::ResultError::UnwillingToPerform
+  end
+  if action.nil?
+    @logger.error "No action defined for route '#{route}'"
+    raise LDAP::ResultError::UnwillingToPerform
+  end
+  
+  class_name = action.split('#').first
+  method_name = action.split('#').last
+  params = LDAP::Server::DN.new("#{dn},op=#{method.to_s}").parse(route)
+  
+  return class_name, method_name, params
+end
+```
+
+### Wildcard Routing
+
+Use `nil` as the DN to match all requests for an operation:
+
+```ruby
+router = LDAP::Server::Router.new(logger) do
+  # Catch-all bind handler
+  bind nil => "AuthController#bind"
+  
+  # Catch-all search (if no other route matches)
+  search nil => "DefaultController#search"
+end
+```
+
+## Error Handling
+
+Raise `LDAP::ResultError` exceptions to send error responses:
+
+```ruby
+def self.search(request, baseObject, scope, deref, filter, params)
+  unless authorized?(request.connection.binddn, baseObject)
+    raise LDAP::ResultError::InsufficientAccessRights, 
+      "Not authorized to search #{baseObject}"
+  end
+  
+  # Perform search...
+end
+```
+
+The router automatically catches exceptions and sends appropriate error responses (see `lib/ldap/server/router.rb:171`).
+
+## Complete Example
+
+From `examples/rbslapd5.rb`:
+
+```ruby
+require 'ldap/server'
+require 'ldap/server/router'
+
+logger = Logger.new($stderr)
+
+class LDAPController
+  def self.bind(request, version, dn, password, params)
+    logger.info "Processing bind for '#{dn}'"
+    # Authenticate...
+  end
+
+  def self.search(request, baseObject, scope, deref, filter, params)
+    logger.info "Processing search for #{baseObject}"
+    
+    h = {
+      'uid' => 'jdoe',
+      'objectClass' => 'userAccount',
+      'givenName' => 'John',
+      'sn' => 'Doe'
+    }
+    request.send_SearchResultEntry("uid=jdoe,#{baseObject}", h)
+  end
+end
+
+router = LDAP::Server::Router.new(logger) do
+  bind nil => "LDAPController#bind"
+  search "ou=Users,dc=mydomain,dc=com" => "LDAPController#search"
+end
+
+server = LDAP::Server.new(
+  port: 1389,
+  router: router
+)
+server.run_tcpserver
+server.join
+```
+
+## Advanced: Multi-Controller Architecture
+
+```ruby
+class UserController
+  def self.search(request, baseObject, scope, deref, filter, params)
+    # Handle user searches
+  end
+  
+  def self.add(request, dn, attributes, params)
+    # Create users
+  end
+end
+
+class GroupController
+  def self.search(request, baseObject, scope, deref, filter, params)
+    # Handle group searches
+  end
+  
+  def self.modify(request, dn, modifications, params)
+    # Update group membership
+  end
+end
+
+class AuthController
+  def self.bind(request, version, dn, password, params)
+    # Centralized authentication
+  end
+end
+
+router = LDAP::Server::Router.new(logger) do
+  bind nil => "AuthController#bind"
+  
+  search "ou=Users,dc=example,dc=com" => "UserController#search"
+  add "ou=Users,dc=example,dc=com" => "UserController#add"
+  
+  search "ou=Groups,dc=example,dc=com" => "GroupController#search"
+  modify "ou=Groups,dc=example,dc=com" => "GroupController#modify"
+  
+  # Parameterized routes
+  search "uid=:uid,ou=Users,dc=example,dc=com" => "UserController#get_user"
+  search "cn=:cn,ou=Groups,dc=example,dc=com" => "GroupController#get_group"
+end
+```
+
+## Router vs Operation Comparison
+
+<CodeGroup>
+```ruby Operation Class
+class MyOperation < LDAP::Server::Operation
+  def search(basedn, scope, deref, filter)
+    # All searches handled here
+    if basedn.include?('ou=Users')
+      # User logic
+    elsif basedn.include?('ou=Groups')
+      # Group logic
+    end
+  end
+end
+
+server = LDAP::Server.new(
+  operation_class: MyOperation
+)
+```
+
+```ruby Router
+class UserController
+  def self.search(request, basedn, scope, deref, filter, params)
+    # User-specific logic
+  end
+end
+
+class GroupController
+  def self.search(request, basedn, scope, deref, filter, params)
+    # Group-specific logic
+  end
+end
+
+router = LDAP::Server::Router.new(logger) do
+  search "ou=Users,dc=example,dc=com" => "UserController#search"
+  search "ou=Groups,dc=example,dc=com" => "GroupController#search"
+end
+
+server = LDAP::Server.new(router: router)
+```
+</CodeGroup>
+
+## Thread Safety
+
+<Warning>
+Controller methods run in separate threads (one per request). Use proper synchronization for shared data access.
+</Warning>
+
+```ruby
+class UserController
+  @@cache = {}
+  @@mutex = Mutex.new
+  
+  def self.search(request, basedn, scope, deref, filter, params)
+    @@mutex.synchronize do
+      # Safe cache access
+      return @@cache[basedn] if @@cache[basedn]
+    end
+    
+    # Fetch from database...
+  end
+end
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    Understanding overall architecture
+  </Card>
+  <Card title="Connection Handling" icon="network-wired" href="/concepts/connection-handling">
+    Learn about connection lifecycle
+  </Card>
+</CardGroup>

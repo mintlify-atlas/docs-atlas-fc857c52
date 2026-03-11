@@ -1,0 +1,366 @@
+---
+title: "LDAP::Server::Router"
+description: "Advanced request routing system for LDAP operations"
+---
+
+## Overview
+
+The `LDAP::Server::Router` class provides an alternative to the standard `Operation` class for handling LDAP requests. It uses a trie-based routing system to map DNs to specific handler methods, enabling more flexible request handling and multiple backends.
+
+## Constants
+
+### Scope Values
+
+<ParamField path="LDAP::Server::Router::BaseObject" type="Integer" default="0">
+  Search only the base object
+</ParamField>
+
+<ParamField path="LDAP::Server::Router::SingleLevel" type="Integer" default="1">
+  Search immediate children
+</ParamField>
+
+<ParamField path="LDAP::Server::Router::WholeSubtree" type="Integer" default="2">
+  Search entire subtree
+</ParamField>
+
+### Dereference Aliases Values
+
+<ParamField path="LDAP::Server::Router::NeverDerefAliases" type="Integer" default="0">
+  Never dereference aliases
+</ParamField>
+
+<ParamField path="LDAP::Server::Router::DerefInSearching" type="Integer" default="1">
+  Dereference during search
+</ParamField>
+
+<ParamField path="LDAP::Server::Router::DerefFindingBaseObj" type="Integer" default="2">
+  Dereference when locating base
+</ParamField>
+
+<ParamField path="LDAP::Server::Router::DerefAlways" type="Integer" default="3">
+  Always dereference
+</ParamField>
+
+## Constructor
+
+### `new(logger, &block)`
+
+Creates a new router and evaluates the configuration block.
+
+<ParamField path="logger" type="Logger">
+  Logger instance for router logging
+</ParamField>
+
+<ParamField path="block" type="Block">
+  Configuration block that defines routes
+</ParamField>
+
+```ruby
+router = LDAP::Server::Router.new(logger) do
+  bind(
+    nil => 'AuthHandler#anonymous_bind',
+    'cn=admin,dc=example,dc=com' => 'AuthHandler#admin_bind'
+  )
+  
+  search(
+    'ou=users,dc=example,dc=com' => 'UserHandler#search_users',
+    'ou=groups,dc=example,dc=com' => 'GroupHandler#search_groups'
+  )
+end
+```
+
+## Routing Methods
+
+These methods are called within the configuration block:
+
+### `route(operation, hash)`
+
+Low-level method to define a route.
+
+<ParamField path="operation" type="Symbol">
+  Operation type (`:bind`, `:search`, `:add`, `:modify`, `:modifydn`, `:del`, `:compare`)
+</ParamField>
+
+<ParamField path="hash" type="Hash">
+  Mapping of DN patterns to handler strings in format `"ClassName#method_name"`
+</ParamField>
+
+### `bind(hash)`, `search(hash)`, `add(hash)`, etc.
+
+Convenience methods for defining routes. Automatically handled via `method_missing`.
+
+<ParamField path="hash" type="Hash">
+  Mapping of DN patterns to handler strings. Use `nil` as key to match all requests for that operation.
+</ParamField>
+
+```ruby
+router = LDAP::Server::Router.new(logger) do
+  # Bind routes
+  bind(
+    nil => 'AuthHandler#any_bind',  # Catch-all
+    'cn=*,dc=example,dc=com' => 'AuthHandler#user_bind'
+  )
+  
+  # Search routes
+  search(
+    'ou=people,dc=example,dc=com' => 'PeopleHandler#search',
+    'ou=groups,dc=example,dc=com' => 'GroupsHandler#search'
+  )
+  
+  # Modify routes
+  modify(
+    'ou=people,dc=example,dc=com' => 'PeopleHandler#modify'
+  )
+  
+  # Add routes
+  add(
+    'ou=people,dc=example,dc=com' => 'PeopleHandler#add'
+  )
+  
+  # Delete routes
+  del(
+    'ou=people,dc=example,dc=com' => 'PeopleHandler#delete'
+  )
+  
+  # ModifyDN routes
+  modifydn(
+    'ou=people,dc=example,dc=com' => 'PeopleHandler#rename'
+  )
+  
+  # Compare routes
+  compare(
+    'ou=people,dc=example,dc=com' => 'PeopleHandler#compare'
+  )
+end
+```
+
+## Internal Methods
+
+### `parse_route(dn, method)`
+
+Parses a DN and operation to find the matching route and handler.
+
+<ParamField path="dn" type="String">
+  Distinguished name from the request
+</ParamField>
+
+<ParamField path="method" type="Symbol">
+  Operation type
+</ParamField>
+
+```ruby
+class_name, method_name, params = router.parse_route(
+  'cn=john,ou=people,dc=example,dc=com',
+  :search
+)
+# Returns: ['PeopleHandler', 'search', {...parsed DN params...}]
+```
+
+<ResponseField name="Returns" type="Array">
+  `[class_name, method_name, params]` where params is a hash of parsed DN components
+</ResponseField>
+
+<ResponseField name="Raises">
+  `LDAP::ResultError::UnwillingToPerform` if no route or handler is found
+</ResponseField>
+
+### `do_bind(connection, messageId, protocolOp, controls)`
+
+Routes a bind request. Called internally by the Connection.
+
+### `do_search(connection, messageId, protocolOp, controls)`
+
+Routes a search request. Called internally by the Connection.
+
+### `log_exception(e, level = :error)`
+
+Logs an exception with backtrace.
+
+<ParamField path="e" type="Exception">
+  Exception to log
+</ParamField>
+
+<ParamField path="level" type="Symbol" default=":error">
+  Log level
+</ParamField>
+
+## Handler Method Signatures
+
+Your handler classes must implement methods with these signatures:
+
+### Bind Handler
+
+```ruby
+class AuthHandler
+  def self.user_bind(request, version, dn, password, params)
+    raise LDAP::ResultError::ProtocolError unless version == 3
+    raise LDAP::ResultError::InvalidCredentials unless valid?(dn, password)
+  end
+end
+```
+
+<ParamField path="request" type="LDAP::Server::Request">
+  Request object with response methods
+</ParamField>
+
+<ParamField path="version" type="Integer">
+  LDAP protocol version
+</ParamField>
+
+<ParamField path="dn" type="String or nil">
+  DN to bind as
+</ParamField>
+
+<ParamField path="password" type="String">
+  Password credential
+</ParamField>
+
+<ParamField path="params" type="Hash">
+  Parsed DN components from route matching
+</ParamField>
+
+### Search Handler
+
+```ruby
+class PeopleHandler
+  def self.search(request, basedn, scope, deref, filter, params)
+    entries = find_entries(basedn, scope, filter)
+    entries.each do |dn, attrs|
+      request.send_SearchResultEntry(dn, attrs)
+    end
+  end
+end
+```
+
+<ParamField path="request" type="LDAP::Server::Request">
+  Request object for sending responses
+</ParamField>
+
+<ParamField path="basedn" type="String">
+  Base DN for search
+</ParamField>
+
+<ParamField path="scope" type="Integer">
+  Search scope
+</ParamField>
+
+<ParamField path="deref" type="Integer">
+  Alias dereferencing
+</ParamField>
+
+<ParamField path="filter" type="LDAP::Server::Filter">
+  Search filter
+</ParamField>
+
+<ParamField path="params" type="Hash">
+  Parsed DN components
+</ParamField>
+
+## Using the Router
+
+To use a router with your server:
+
+```ruby
+router = LDAP::Server::Router.new(Logger.new($stdout)) do
+  bind(
+    nil => 'AuthHandler#bind',
+    'cn=admin,dc=example,dc=com' => 'AuthHandler#admin_bind'
+  )
+  
+  search(
+    'ou=users,dc=example,dc=com' => 'UserHandler#search',
+    'ou=groups,dc=example,dc=com' => 'GroupHandler#search'
+  )
+end
+
+server = LDAP::Server.new(
+  port: 1389,
+  router: router,  # Use router instead of operation_class
+  namingContexts: ['dc=example,dc=com']
+)
+
+server.run_tcpserver
+server.join
+```
+
+## Complete Example
+
+```ruby
+require 'ldap/server'
+
+class AuthHandler
+  def self.anonymous_bind(request, version, dn, password, params)
+    # Allow anonymous
+  end
+  
+  def self.admin_bind(request, version, dn, password, params)
+    raise LDAP::ResultError::InvalidCredentials unless password == 'secret'
+  end
+end
+
+class UserHandler
+  def self.search_users(request, basedn, scope, deref, filter, params)
+    users = [
+      ['cn=john,ou=users,dc=example,dc=com', {
+        'cn' => ['john'],
+        'objectClass' => ['person']
+      }],
+      ['cn=jane,ou=users,dc=example,dc=com', {
+        'cn' => ['jane'],
+        'objectClass' => ['person']
+      }]
+    ]
+    
+    users.each do |dn, attrs|
+      request.send_SearchResultEntry(dn, attrs)
+    end
+  end
+end
+
+class GroupHandler
+  def self.search_groups(request, basedn, scope, deref, filter, params)
+    groups = [
+      ['cn=admins,ou=groups,dc=example,dc=com', {
+        'cn' => ['admins'],
+        'objectClass' => ['groupOfNames'],
+        'member' => ['cn=john,ou=users,dc=example,dc=com']
+      }]
+    ]
+    
+    groups.each do |dn, attrs|
+      request.send_SearchResultEntry(dn, attrs)
+    end
+  end
+end
+
+logger = Logger.new($stdout)
+logger.level = Logger::DEBUG
+
+router = LDAP::Server::Router.new(logger) do
+  bind(
+    nil => 'AuthHandler#anonymous_bind',
+    'cn=admin,dc=example,dc=com' => 'AuthHandler#admin_bind'
+  )
+  
+  search(
+    'ou=users,dc=example,dc=com' => 'UserHandler#search_users',
+    'ou=groups,dc=example,dc=com' => 'GroupHandler#search_groups'
+  )
+end
+
+server = LDAP::Server.new(
+  port: 1389,
+  router: router,
+  namingContexts: ['dc=example,dc=com']
+)
+
+server.run_tcpserver
+server.join
+```
+
+## Benefits of Router
+
+- **Multiple backends**: Route different DN subtrees to different handlers
+- **Clean separation**: Each handler class focuses on one area of the directory
+- **Dynamic routing**: Routes are evaluated at runtime based on the DN pattern
+- **Parameter extraction**: Automatically parses DN components and passes them to handlers

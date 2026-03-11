@@ -1,0 +1,301 @@
+---
+title: "LDAP::Server::Connection"
+description: "Handles LDAP client connections and request/response flow"
+---
+
+## Overview
+
+The `LDAP::Server::Connection` class manages individual client connections. It handles the asynchronous nature of LDAP, where multiple requests and responses can be in flight simultaneously. Each request is processed in its own thread, with a mutex protecting the I/O stream.
+
+## Constructor
+
+### `new(io, opt = {})`
+
+Creates a new connection handler.
+
+<ParamField path="io" type="IO">
+  The IO object (socket) for this connection
+</ParamField>
+
+<ParamField path="opt" type="Hash" default="{}">
+  Options hash, typically passed from the Server instance
+  
+  <Expandable title="Options">
+    <ParamField path="logger" type="Logger">
+      Logger instance for connection logging
+    </ParamField>
+    
+    <ParamField path="ssl_on_connect" type="Boolean">
+      If true, immediately upgrades the connection to SSL
+    </ParamField>
+    
+    <ParamField path="ssl_ctx" type="OpenSSL::SSL::SSLContext">
+      SSL context for encrypted connections
+    </ParamField>
+    
+    <ParamField path="operation_class" type="Class">
+      Class to instantiate for handling operations
+    </ParamField>
+    
+    <ParamField path="operation_args" type="Array">
+      Arguments passed to operation class constructor
+    </ParamField>
+    
+    <ParamField path="router" type="LDAP::Server::Router">
+      Optional router for request routing
+    </ParamField>
+    
+    <ParamField path="server" type="LDAP::Server">
+      Reference to the parent server instance
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Instance Attributes
+
+### `binddn`
+
+Read-only. The DN that the client is currently bound as, or `nil` if not authenticated.
+
+```ruby
+connection.binddn  # => "cn=admin,dc=example,dc=com"
+```
+
+### `version`
+
+Read-only. The LDAP protocol version negotiated (typically 3).
+
+### `opt`
+
+Read-only. The options hash passed to the constructor.
+
+## Instance Methods
+
+### `handle_requests`
+
+Main request handling loop. Reads LDAP messages from the socket, decodes them, and dispatches to appropriate handlers. This method blocks until the connection is closed.
+
+```ruby
+LDAP::Server::Connection.new(socket, options).handle_requests
+```
+
+Handles these LDAP operations:
+- **BindRequest (tag 0)**: Authentication
+- **UnbindRequest (tag 2)**: Closes connection
+- **SearchRequest (tag 3)**: Directory searches
+- **ModifyRequest (tag 6)**: Entry modifications
+- **AddRequest (tag 8)**: Add new entries
+- **DelRequest (tag 10)**: Delete entries
+- **ModifyDNRequest (tag 12)**: Rename/move entries
+- **CompareRequest (tag 14)**: Attribute comparison
+- **AbandonRequest (tag 16)**: Cancel pending operations
+
+### `startssl`
+
+Upgrades the connection to SSL/TLS. Yields to a block before performing the upgrade if provided.
+
+```ruby
+connection.startssl do
+  # Optional: send StartTLS extended response
+end
+```
+
+<ResponseField name="Raises">
+  `LDAP::ResultError::OperationsError` if SSL is already active or operations are in progress
+</ResponseField>
+
+### `log(msg, severity = Logger::INFO)`
+
+Logs a message with the client's IP address.
+
+<ParamField path="msg" type="String">
+  Message to log
+</ParamField>
+
+<ParamField path="severity" type="Integer" default="Logger::INFO">
+  Log severity level
+</ParamField>
+
+```ruby
+connection.log "Client authenticated", Logger::INFO
+```
+
+### `debug(msg)`
+
+Logs a debug-level message.
+
+```ruby
+connection.debug "Processing search request"
+```
+
+### `log_exception(e)`
+
+Logs an exception with full backtrace at ERROR level.
+
+<ParamField path="e" type="Exception">
+  The exception to log
+</ParamField>
+
+```ruby
+begin
+  # some operation
+rescue => e
+  connection.log_exception(e)
+end
+```
+
+### `ber_read(io)`
+
+Reads one ASN.1 BER-encoded element from the stream. Returns a String containing the raw element.
+
+<ParamField path="io" type="IO">
+  The IO stream to read from
+</ParamField>
+
+```ruby
+blk = connection.ber_read(@io)
+asn1 = OpenSSL::ASN1::decode(blk)
+```
+
+<ResponseField name="Returns" type="String">
+  Raw BER-encoded data
+</ResponseField>
+
+<ResponseField name="Throws">
+  `:close` symbol if connection is closed
+</ResponseField>
+
+### `start_op(messageId, protocolOp, controls, method)`
+
+Starts an operation in a new thread. The thread is added to a ThreadGroup for tracking and abandonment.
+
+<ParamField path="messageId" type="Integer">
+  LDAP message ID
+</ParamField>
+
+<ParamField path="protocolOp" type="OpenSSL::ASN1::ASN1Data">
+  The protocol operation
+</ParamField>
+
+<ParamField path="controls" type="Array">
+  LDAP controls (optional)
+</ParamField>
+
+<ParamField path="method" type="Symbol">
+  Method name to invoke (e.g., `:do_search`, `:do_modify`)
+</ParamField>
+
+### `write(data)`
+
+Writes data to the socket in a thread-safe manner.
+
+<ParamField path="data" type="String">
+  Data to write
+</ParamField>
+
+```ruby
+connection.write(encoded_response)
+```
+
+### `writelock`
+
+Yields the IO object with exclusive write access, then flushes.
+
+```ruby
+connection.writelock do |io|
+  io.write(response1)
+  io.write(response2)
+end
+```
+
+### `abandon(messageID)`
+
+Abandons a pending operation by raising `LDAP::Abandon` in its thread.
+
+<ParamField path="messageID" type="Integer">
+  Message ID of the operation to abandon
+</ParamField>
+
+```ruby
+connection.abandon(123)
+```
+
+### `abandon_all`
+
+Abandons all pending operations. Called when the client unbinds or disconnects.
+
+```ruby
+connection.abandon_all
+```
+
+### `send_unsolicited_notification(resultCode, opt = {})`
+
+Sends an unsolicited notification to the client.
+
+<ParamField path="resultCode" type="Integer">
+  LDAP result code
+</ParamField>
+
+<ParamField path="opt" type="Hash" default="{}">
+  Optional parameters
+  
+  <Expandable title="Options">
+    <ParamField path="matchedDN" type="String" default="''">
+      Matched DN field
+    </ParamField>
+    
+    <ParamField path="errorMessage" type="String" default="''">
+      Error message
+    </ParamField>
+    
+    <ParamField path="referral" type="Array<String>">
+      Referral URLs
+    </ParamField>
+    
+    <ParamField path="responseName" type="String">
+      OID of the extended response
+    </ParamField>
+    
+    <ParamField path="response" type="String">
+      Extended response value
+    </ParamField>
+    
+    <ParamField path="controls" type="Array">
+      LDAP controls
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### `send_notice_of_disconnection(resultCode, errorMessage = "")`
+
+Sends a Notice of Disconnection unsolicited notification.
+
+<ParamField path="resultCode" type="Integer">
+  LDAP result code
+</ParamField>
+
+<ParamField path="errorMessage" type="String" default="''">
+  Error message
+</ParamField>
+
+```ruby
+connection.send_notice_of_disconnection(
+  LDAP::ResultError::ProtocolError.new.to_i,
+  "Protocol violation"
+)
+```
+
+## Thread Safety
+
+The Connection class uses a mutex to ensure thread-safe access to the I/O stream. Multiple operations can run concurrently in separate threads, but responses are serialized through the mutex to prevent interleaving.
+
+## Example
+
+The Connection class is typically instantiated by the Server:
+
+```ruby
+# In server.rb
+LDAP::Server.tcpserver(options) do
+  LDAP::Server::Connection.new(self, opt).handle_requests
+end
+```

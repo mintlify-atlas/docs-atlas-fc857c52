@@ -1,0 +1,716 @@
+---
+title: Threading
+description: Understanding threading vs prefork modes, thread safety, and performance implications
+---
+
+## Overview
+
+ruby-ldapserver supports two operational modes:
+
+1. **Threading mode** (default) - Uses Ruby threads for concurrency
+2. **Prefork mode** - Uses multiple processes for isolation and scalability
+
+Understanding the differences and trade-offs is essential for building robust LDAP servers.
+
+<Note>
+Each LDAP operation runs in its own thread, even within a single client connection, because the LDAP protocol allows clients to send multiple overlapping requests down the same connection.
+</Note>
+
+## Threading Mode
+
+The default mode creates a Ruby thread for each client connection and each LDAP operation.
+
+### Starting Threading Mode
+
+```ruby
+server = LDAP::Server.new(
+  port: 1389,
+  operation_class: MyOperation,
+  operation_args: [shared_data]
+)
+
+server.run_tcpserver  # Uses threading
+server.join
+```
+
+### How It Works
+
+```ruby
+# For each client connection:
+#   - New Ruby thread created
+#   - Connection handled in that thread
+#   - For each LDAP operation in the connection:
+#     - New Ruby thread created
+#     - Operation.new called with operation_args
+#     - Operation method invoked (search, bind, etc.)
+```
+
+### Thread Lifecycle
+
+```ruby
+class MyOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, shared_data)
+    super(connection, messageID)
+    @shared_data = shared_data  # Shared between all operations
+    # This runs in a NEW THREAD for each operation
+  end
+  
+  def search(basedn, scope, deref, filter)
+    # This method runs in the operation's thread
+    # Multiple search operations can run simultaneously
+  end
+end
+```
+
+### Advantages
+
+<CardGroup cols={2}>
+<Card title="Shared State" icon="share-nodes">
+Operations can share data in RAM via operation_args
+</Card>
+
+<Card title="Lower Overhead" icon="gauge">
+Threads are lighter than processes
+</Card>
+
+<Card title="Simple Setup" icon="circle-check">
+No external dependencies required
+</Card>
+
+<Card title="Easy Debugging" icon="bug">
+Single process is easier to debug
+</Card>
+</CardGroup>
+
+### Disadvantages
+
+<CardGroup cols={2}>
+<Card title="Single CPU" icon="microchip">
+All operations run on one CPU core (Ruby GVL)
+</Card>
+
+<Card title="Thread Safety" icon="lock">
+Must ensure thread-safe access to shared data
+</Card>
+
+<Card title="Blocking Operations" icon="circle-pause">
+C extensions can block the entire interpreter
+</Card>
+
+<Card title="File Descriptors" icon="file">
+May hit FD limits with many connections
+</Card>
+</CardGroup>
+
+## Prefork Mode
+
+Prefork mode uses multiple worker processes, each handling client connections.
+
+### Requirements
+
+<Note>
+Prefork mode requires the `prefork` gem:
+
+```bash
+gem install prefork
+```
+</Note>
+
+### Starting Prefork Mode
+
+```ruby
+server = LDAP::Server.new(
+  port: 1389,
+  operation_class: MyOperation,
+  operation_args: [shared_data],
+  min_servers: 5,
+  max_servers: 20,
+  max_request_per_child: 1000,
+  max_idle: 60
+)
+
+server.run_prefork  # Uses prefork
+server.join
+```
+
+### Configuration Options
+
+```ruby
+server = LDAP::Server.new(
+  min_servers: 5,              # Minimum worker processes
+  max_servers: 20,             # Maximum worker processes
+  max_request_per_child: 1000, # Requests before worker restart
+  max_idle: 60,                # Seconds before idle worker exits
+  # ... other options ...
+)
+```
+
+### How It Works
+
+```ruby
+# Master process:
+#   - Forks min_servers worker processes
+#   - Monitors workers and forks more as needed (up to max_servers)
+#   - Restarts workers that crash
+#
+# Each worker process:
+#   - Accepts client connections
+#   - Handles operations in threads (within that process)
+#   - Exits after max_request_per_child requests
+#   - Exits after max_idle seconds of inactivity
+```
+
+### Advantages
+
+<CardGroup cols={2}>
+<Card title="Multi-CPU" icon="server">
+Utilizes multiple CPU cores effectively
+</Card>
+
+<Card title="Isolation" icon="shield">
+Workers isolated from each other
+</Card>
+
+<Card title="Scalability" icon="chart-line">
+Better scalability under high load
+</Card>
+
+<Card title="No Thread Issues" icon="circle-xmark">
+No Ruby threading or blocking concerns
+</Card>
+</CardGroup>
+
+### Disadvantages
+
+<CardGroup cols={2}>
+<Card title="No Shared RAM" icon="ban">
+Workers cannot share data in memory
+</Card>
+
+<Card title="Higher Overhead" icon="memory">
+Processes use more memory than threads
+</Card>
+
+<Card title="Complex State" icon="database">
+Must use external storage for shared state
+</Card>
+
+<Card title="External Dependency" icon="cube">
+Requires the prefork gem
+</Card>
+</CardGroup>
+
+## Thread Safety
+
+When using threading mode, operations that access shared data must be thread-safe.
+
+### Thread Safety Problem
+
+```ruby
+# UNSAFE: Multiple threads can corrupt the hash
+class UnsafeOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, directory)
+    super(connection, messageID)
+    @directory = directory  # Shared hash
+  end
+  
+  def search(basedn, scope, deref, filter)
+    # Multiple threads can read @directory simultaneously
+    # This is usually safe for reads
+    @directory.each do |dn, entry|
+      # ...
+    end
+  end
+  
+  def add(dn, av)
+    # PROBLEM: Multiple threads modifying the hash
+    @directory[dn] = av  # Race condition!
+  end
+end
+```
+
+### Solution 1: Mutex
+
+Use a Mutex to synchronize access:
+
+```ruby
+require 'thread'
+
+class SafeOperation < LDAP::Server::Operation
+  @@mutex = Mutex.new
+  
+  def initialize(connection, messageID, directory)
+    super(connection, messageID)
+    @directory = directory
+  end
+  
+  def search(basedn, scope, deref, filter)
+    # Reads can be unprotected if underlying data is thread-safe
+    @directory.each do |dn, entry|
+      send_SearchResultEntry(dn, entry) if matches?(filter, entry)
+    end
+  end
+  
+  def add(dn, av)
+    @@mutex.synchronize do
+      raise LDAP::ResultError::EntryAlreadyExists if @directory[dn]
+      @directory[dn] = av
+    end
+  end
+  
+  def modify(dn, ops)
+    @@mutex.synchronize do
+      entry = @directory[dn]
+      raise LDAP::ResultError::NoSuchObject unless entry
+      # Apply modifications
+      apply_operations(entry, ops)
+    end
+  end
+end
+```
+
+### Solution 2: Thread-Safe Data Structures
+
+Use thread-safe data structures:
+
+```ruby
+require 'thread'
+
+class ThreadSafeDirectory
+  def initialize
+    @data = {}
+    @mutex = Mutex.new
+  end
+  
+  def get(dn)
+    @mutex.synchronize { @data[dn] }
+  end
+  
+  def set(dn, entry)
+    @mutex.synchronize { @data[dn] = entry }
+  end
+  
+  def delete(dn)
+    @mutex.synchronize { @data.delete(dn) }
+  end
+  
+  def each(&block)
+    # Create a copy to avoid holding lock during iteration
+    copy = @mutex.synchronize { @data.dup }
+    copy.each(&block)
+  end
+end
+
+# Usage:
+directory = ThreadSafeDirectory.new
+
+server = LDAP::Server.new(
+  port: 1389,
+  operation_class: MyOperation,
+  operation_args: [directory]
+)
+```
+
+### Solution 3: Use Prefork Mode
+
+Avoid threading issues entirely:
+
+```ruby
+# With prefork, each worker has its own copy of data
+# Must persist to disk/database for sharing between workers
+
+class FileBackedOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, filename)
+    super(connection, messageID)
+    @filename = filename
+  end
+  
+  def search(basedn, scope, deref, filter)
+    # Load fresh data from disk
+    data = load_from_file(@filename)
+    data.each do |dn, entry|
+      send_SearchResultEntry(dn, entry) if matches?(filter, entry)
+    end
+  end
+  
+  def add(dn, av)
+    # Use file locking
+    File.open(@filename + ".lock", "w") do |lock|
+      lock.flock(File::LOCK_EX)
+      data = load_from_file(@filename)
+      raise LDAP::ResultError::EntryAlreadyExists if data[dn]
+      data[dn] = av
+      save_to_file(@filename, data)
+    end
+  end
+end
+```
+
+## Threading Examples
+
+### Example: Thread-Safe In-Memory Directory
+
+From `examples/rbslapd1.rb`:
+
+```ruby
+require 'ldap/server'
+require 'yaml'
+require 'thread'
+
+class HashOperation < LDAP::Server::Operation
+  @@mutex = Mutex.new
+  
+  def initialize(connection, messageID, hash)
+    super(connection, messageID)
+    @hash = hash
+  end
+  
+  def search(basedn, scope, deref, filter)
+    # Reads are safe if hash is not being modified
+    basedn = basedn.downcase
+    
+    case scope
+    when LDAP::Server::WholeSubtree
+      @hash.each do |dn, av|
+        next unless dn.index(basedn, -basedn.length)
+        next unless LDAP::Server::Filter.run(filter, av)
+        send_SearchResultEntry(dn, av)
+      end
+    end
+  end
+  
+  def add(dn, av)
+    dn = dn.downcase
+    @@mutex.synchronize do
+      raise LDAP::ResultError::EntryAlreadyExists if @hash[dn]
+      @hash[dn] = av
+    end
+  end
+  
+  def del(dn)
+    dn = dn.downcase
+    @@mutex.synchronize do
+      raise LDAP::ResultError::NoSuchObject unless @hash[dn]
+      @hash.delete(dn)
+    end
+  end
+end
+
+directory = {}
+
+# Load initial data
+begin
+  File.open("ldapdb.yaml") { |f| directory = YAML.load(f.read) }
+rescue Errno::ENOENT
+end
+
+# Save on exit
+at_exit do
+  File.open("ldapdb.new", "w") { |f| f.write(YAML.dump(directory)) }
+  File.rename("ldapdb.new", "ldapdb.yaml")
+end
+
+server = LDAP::Server.new(
+  port: 1389,
+  operation_class: HashOperation,
+  operation_args: [directory]
+)
+
+server.run_tcpserver
+server.join
+```
+
+### Example: Prefork with File Locking
+
+From `examples/rbslapd3.rb`:
+
+```ruby
+require 'ldap/server'
+require 'yaml'
+
+class Directory
+  attr_reader :data
+  
+  def initialize(filename)
+    @filename = filename
+    @stat = nil
+    update
+  end
+  
+  # Re-read from disk if changed
+  def update
+    begin
+      tmp = {}
+      sb = File.stat(@filename)
+      return if @stat && @stat.ino == sb.ino && @stat.mtime == sb.mtime
+      File.open(@filename) { |f| tmp = YAML.load(f.read); @stat = f.stat }
+    rescue Errno::ENOENT
+    end
+    @data = tmp
+  end
+  
+  # Write back to disk
+  def write
+    File.open(@filename + ".new", "w") { |f| f.write(YAML.dump(@data)) }
+    File.rename(@filename + ".new", @filename)
+    @stat = File.stat(@filename)
+  end
+  
+  # Run block with exclusive lock
+  def lock
+    File.open(@filename + ".lock", "w") do |f|
+      f.flock(File::LOCK_EX)
+      yield
+    end
+  end
+end
+
+class DirOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, dir)
+    super(connection, messageID)
+    @dir = dir
+  end
+  
+  def search(basedn, scope, deref, filter)
+    @dir.update  # Reload from disk
+    @dir.data.each do |dn, av|
+      next unless dn.index(basedn, -basedn.length)
+      next unless LDAP::Server::Filter.run(filter, av)
+      send_SearchResultEntry(dn, av)
+    end
+  end
+  
+  def add(dn, av)
+    @dir.lock do
+      @dir.update
+      raise LDAP::ResultError::EntryAlreadyExists if @dir.data[dn]
+      @dir.data[dn] = av
+      @dir.write
+    end
+  end
+end
+
+directory = Directory.new("ldapdb.yaml")
+
+server = LDAP::Server.new(
+  port: 1389,
+  operation_class: DirOperation,
+  operation_args: [directory]
+)
+
+server.run_prefork
+server.join
+```
+
+## Blocking Operations
+
+Some Ruby C extensions block the entire interpreter, not just the current thread.
+
+### Problem: ruby-ldap Client
+
+```ruby
+require 'ldap'  # ruby-ldap gem (C extension)
+
+class ProxyOperation < LDAP::Server::Operation
+  def search(basedn, scope, deref, filter)
+    # PROBLEM: This blocks ALL threads while waiting
+    conn = LDAP::Conn.new('backend.example.com', 389)
+    conn.bind
+    conn.search(basedn, scope, filter) do |entry|
+      send_SearchResultEntry(entry.dn, entry.to_hash)
+    end
+    conn.unbind
+  end
+end
+```
+
+While this search waits for the backend server, **no other operations can run** - the entire Ruby interpreter is blocked.
+
+### Solution 1: Use Pure Ruby Libraries
+
+```ruby
+# Instead of ruby-ldap (C wrapper), use net-ldap (pure Ruby)
+require 'net/ldap'
+
+class ProxyOperation < LDAP::Server::Operation
+  def search(basedn, scope, deref, filter)
+    # Pure Ruby - doesn't block other threads
+    ldap = Net::LDAP.new(host: 'backend.example.com', port: 389)
+    ldap.bind
+    ldap.search(base: basedn, scope: scope) do |entry|
+      send_SearchResultEntry(entry.dn, entry.to_hash)
+    end
+  end
+end
+```
+
+### Solution 2: Use Prefork Mode
+
+With prefork, each worker process can block independently:
+
+```ruby
+server = LDAP::Server.new(
+  port: 1389,
+  operation_class: ProxyOperation,
+  max_servers: 10  # 10 workers can block independently
+)
+server.run_prefork
+```
+
+### Common Blocking Operations
+
+<Warning>
+These C extensions may block Ruby threading:
+</Warning>
+
+- `ruby-ldap` - LDAP client
+- `mysql` (not `mysql2` or `ruby-mysql`) - MySQL client
+- DNS resolution (use `require 'resolv-replace'`)
+- Some `net/http` operations
+
+## DNS Resolution
+
+The standard C resolver blocks threads. Use pure Ruby resolver:
+
+```ruby
+require 'resolv-replace'
+
+# This replaces TCPSocket and friends with pure Ruby DNS
+# Put this at the top of your server file
+```
+
+From the README:
+
+```ruby
+# Even with pure Ruby MySQL client, beware DNS lookups
+require 'resolv-replace'  # Use pure Ruby DNS resolver
+require 'ruby-mysql'      # Pure Ruby MySQL client
+
+class SQLOperation < LDAP::Server::Operation
+  def search(basedn, scope, deref, filter)
+    # Now both MySQL and DNS are thread-friendly
+    conn = Mysql.new('db.example.com', ...)
+    # ...
+  end
+end
+```
+
+## Choosing Between Threading and Prefork
+
+### Use Threading If:
+
+- Single or few-core system
+- Operations need to share state in RAM
+- Using pure Ruby libraries (no blocking C extensions)
+- Lower memory footprint is important
+- Simpler development/debugging preferred
+
+### Use Prefork If:
+
+- Multi-core system available
+- High concurrency expected
+- Using C extensions that may block
+- Process isolation desired
+- Willing to use external storage for shared state
+
+### Comparison Matrix
+
+| Aspect | Threading | Prefork |
+|--------|-----------|----------|
+| **CPU Usage** | Single core | Multi-core |
+| **Memory** | Lower | Higher |
+| **Shared State** | Easy (RAM) | Hard (file/DB) |
+| **C Extension Blocking** | Problem | No issue |
+| **Complexity** | Simple | Moderate |
+| **Scalability** | Limited | Better |
+| **Debugging** | Easier | Harder |
+
+## Abandoned Operations
+
+LDAP clients can abandon operations that are taking too long.
+
+### Handling Abandon
+
+The framework raises `LDAP::Server::Abandon` in the operation thread:
+
+```ruby
+class MyOperation < LDAP::Server::Operation
+  def search(basedn, scope, deref, filter)
+    # Long-running search
+    large_dataset.each do |dn, entry|
+      send_SearchResultEntry(dn, entry)
+    end
+    
+  rescue Abandon
+    # Client abandoned - just return, no response needed
+    # Clean up any resources if necessary
+    return
+  end
+end
+```
+
+<Note>
+You rarely need to rescue Abandon explicitly - the framework handles it. Just be aware that your operation thread may be interrupted.
+</Note>
+
+### Resource Cleanup with Abandon
+
+```ruby
+def search(basedn, scope, deref, filter)
+  sql_conn = get_sql_connection
+  
+  begin
+    # Execute query
+    results = sql_conn.query("SELECT ...")
+    results.each do |row|
+      send_SearchResultEntry(row_to_dn(row), row_to_av(row))
+    end
+  rescue Abandon
+    # Don't put connection back in pool - query may still be running
+    sql_conn.close
+    raise
+  ensure
+    return_to_pool(sql_conn) unless $!.is_a?(Abandon)
+  end
+end
+```
+
+## Performance Considerations
+
+See the [Performance guide](/guides/performance) for detailed benchmarking and optimization.
+
+### Threading Mode Performance
+
+From `examples/speedtest.rb` results:
+
+```
+Single-processor AMD Athlon 2500+:
+- N=1, M=1000:  ~800 searches/second
+- N=10, M=100:  ~300-400 searches/second
+```
+
+### Prefork Mode Performance
+
+Better scaling with multiple cores:
+
+```ruby
+# Configure for your hardware
+server = LDAP::Server.new(
+  min_servers: num_cpus,
+  max_servers: num_cpus * 2,
+  max_request_per_child: 10000,
+  # ...
+)
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+<Card title="Performance" icon="gauge-high" href="/guides/performance">
+Benchmark and optimize your server
+</Card>
+
+<Card title="Building Server" icon="server" href="/guides/building-server">
+Learn about server configuration options
+</Card>
+</CardGroup>

@@ -1,0 +1,630 @@
+---
+title: Legacy Operation Class
+description: Using the Operation class approach for LDAP request handling
+---
+
+## Overview
+
+The Operation class approach is the original method for handling LDAP requests in ruby-ldapserver. While the [Router](/guides/request-router) is now recommended for new applications, the Operation class is still fully supported and may be preferred for:
+
+- Migrating existing applications
+- Simpler servers that don't need routing
+- Applications that need direct control over all LDAP protocol details
+
+<Note>
+For new applications, consider using the [Router approach](/guides/request-router) which offers better code organization.
+</Note>
+
+## Basic Usage
+
+<Steps>
+
+<Step title="Create an Operation subclass">
+Subclass `LDAP::Server::Operation` and override the methods for operations you want to support:
+
+```ruby
+require 'ldap/server'
+
+class MyOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, *args)
+    super(connection, messageID)
+    @custom_arg = args.first  # Access custom arguments
+  end
+end
+```
+</Step>
+
+<Step title="Implement operation handlers">
+Override methods for each LDAP operation:
+
+```ruby
+class MyOperation < LDAP::Server::Operation
+  def simple_bind(version, dn, password)
+    # Handle authentication
+  end
+
+  def search(basedn, scope, deref, filter)
+    # Handle searches
+  end
+end
+```
+</Step>
+
+<Step title="Configure the server">
+Pass your Operation class to the server:
+
+```ruby
+server = LDAP::Server.new(
+  port: 1389,
+  operation_class: MyOperation,
+  operation_args: [custom_data]  # Passed to initialize
+)
+
+server.run_tcpserver
+server.join
+```
+</Step>
+
+</Steps>
+
+## Operation Lifecycle
+
+A new Operation instance is created for **each LDAP request** from a client:
+
+```ruby
+class MyOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, shared_data)
+    super(connection, messageID)
+    @shared_data = shared_data
+    
+    # Available instance variables:
+    # @connection - Connection object
+    # @schema - Schema object (if configured)
+    # @server - Server instance
+  end
+end
+```
+
+<Warning>
+Each operation runs in its own thread. If operations access shared data (passed via `operation_args`), you must ensure thread-safe access. See the [Threading guide](/guides/threading).
+</Warning>
+
+## Implementing Operations
+
+### Simple Bind
+
+Handle authentication requests:
+
+```ruby
+def simple_bind(version, dn, password)
+  # version: LDAP protocol version (typically 3)
+  # dn: Distinguished Name (nil for anonymous)
+  # password: Password string
+  
+  # Example: accept only v3 and anonymous
+  if version != 3
+    raise LDAP::ResultError::ProtocolError, "version 3 only"
+  end
+  
+  if dn.nil?
+    # Anonymous bind - accept
+    return
+  end
+  
+  # Validate credentials
+  if valid_credentials?(dn, password)
+    return  # Accept
+  else
+    raise LDAP::ResultError::InvalidCredentials, "Bad credentials"
+  end
+end
+```
+
+The default implementation:
+- Requires LDAP v3
+- Accepts only anonymous binds
+- Rejects any DN/password combination
+
+### Search
+
+Handle search requests and return matching entries:
+
+```ruby
+def search(basedn, scope, deref, filter)
+  # basedn: Base DN for search
+  # scope: LDAP::Server::BaseObject (0), SingleLevel (1), or WholeSubtree (2)
+  # deref: Alias dereferencing setting (0-3)
+  # filter: Parsed filter array
+  
+  # Example: BaseObject search
+  case scope
+  when LDAP::Server::BaseObject
+    entry = find_entry(basedn)
+    raise LDAP::ResultError::NoSuchObject unless entry
+    
+    # Check filter matches
+    if LDAP::Server::Filter.run(filter, entry)
+      send_SearchResultEntry(basedn, entry)
+    end
+    
+  when LDAP::Server::WholeSubtree
+    # Search entire subtree
+    all_entries.each do |dn, attributes|
+      next unless dn.end_with?(basedn)  # Under base?
+      next unless LDAP::Server::Filter.run(filter, attributes)
+      send_SearchResultEntry(dn, attributes)
+    end
+    
+  when LDAP::Server::SingleLevel
+    # Search one level below base
+    raise LDAP::ResultError::UnwillingToPerform, "OneLevel not implemented"
+  end
+end
+```
+
+<Note>
+Time and size limits are handled automatically. The operation will raise `LDAP::ResultError::TimeLimitExceeded` or `LDAP::ResultError::SizeLimitExceeded` if limits are reached.
+</Note>
+
+### Add
+
+Handle requests to add new entries:
+
+```ruby
+def add(dn, attributes)
+  # dn: Distinguished Name for new entry
+  # attributes: Hash of { 'attr' => ['val1', 'val2'], ... }
+  
+  # Validate with schema if available
+  if @schema
+    attributes = @schema.validate(attributes)
+  end
+  
+  # Check if entry already exists
+  raise LDAP::ResultError::EntryAlreadyExists if entry_exists?(dn)
+  
+  # Check authorization
+  unless authorized_to_add?(@connection.binddn, dn)
+    raise LDAP::ResultError::InsufficientAccessRights
+  end
+  
+  # Add the entry
+  store_entry(dn, attributes)
+end
+```
+
+### Modify
+
+Handle requests to modify existing entries:
+
+```ruby
+def modify(dn, operations)
+  # dn: Distinguished Name to modify
+  # operations: Hash of { 'attr' => [:op, 'val1', 'val2'], ... }
+  # where :op is :add, :delete, or :replace
+  
+  entry = find_entry(dn)
+  raise LDAP::ResultError::NoSuchObject unless entry
+  
+  operations.each do |attr, vals|
+    op = vals.shift
+    
+    case op
+    when :add
+      # Add values to attribute
+      entry[attr] ||= []
+      entry[attr] += vals
+      entry[attr].uniq!
+      
+    when :delete
+      if vals.empty?
+        # Delete entire attribute
+        entry.delete(attr)
+      else
+        # Delete specific values
+        vals.each { |v| entry[attr].delete(v) }
+      end
+      
+    when :replace
+      # Replace all values
+      entry[attr] = vals
+    end
+    
+    # Clean up empty attributes
+    entry.delete(attr) if entry[attr]&.empty?
+  end
+  
+  # Validate with schema if available
+  if @schema
+    entry = @schema.validate(operations, entry)
+  end
+  
+  update_entry(dn, entry)
+end
+```
+
+### Delete
+
+Handle delete requests:
+
+```ruby
+def del(dn)
+  # dn: Distinguished Name to delete
+  
+  raise LDAP::ResultError::NoSuchObject unless entry_exists?(dn)
+  
+  # Check authorization
+  unless authorized_to_delete?(@connection.binddn, dn)
+    raise LDAP::ResultError::InsufficientAccessRights
+  end
+  
+  delete_entry(dn)
+end
+```
+
+### Modify DN
+
+Handle rename/move requests:
+
+```ruby
+def modifydn(entry, newrdn, deleteoldrdn, newSuperior)
+  # entry: Current DN
+  # newrdn: New RDN (e.g., "cn=New Name")
+  # deleteoldrdn: Boolean - remove old RDN attribute?
+  # newSuperior: New parent DN (or nil to keep same parent)
+  
+  raise LDAP::ResultError::UnwillingToPerform, "modifydn not implemented"
+end
+```
+
+### Compare
+
+Handle compare requests:
+
+```ruby
+def compare(entry, attr, val)
+  # entry: DN to compare
+  # attr: Attribute name
+  # val: Value to compare
+  # Return: true or false
+  
+  obj = find_entry(entry)
+  raise LDAP::ResultError::NoSuchObject unless obj
+  
+  values = obj[attr]
+  return false unless values
+  
+  values = [values] unless values.is_a?(Array)
+  values.include?(val)
+end
+```
+
+## Sending Results
+
+The Operation class provides methods for sending responses:
+
+### Send Search Results
+
+```ruby
+send_SearchResultEntry(dn, attributes)
+
+# Example:
+send_SearchResultEntry(
+  "uid=jdoe,ou=Users,dc=example,dc=com",
+  {
+    'uid' => ['jdoe'],
+    'cn' => ['John Doe'],
+    'mail' => ['john@example.com', 'jdoe@example.com'],
+    'objectClass' => ['inetOrgPerson', 'person', 'top']
+  }
+)
+```
+
+<Note>
+You don't need to call `send_SearchResultDone` - it's called automatically after your search method returns.
+</Note>
+
+### Search Referrals
+
+```ruby
+send_SearchResultReference(['ldap://other.server/dc=example,dc=com'])
+```
+
+## Size and Time Limits
+
+Override these methods to set limits per connection:
+
+```ruby
+def server_sizelimit
+  # Return max number of entries, or nil for unlimited
+  1000
+end
+
+def server_timelimit
+  # Return max seconds, or nil for default (10)
+  30
+end
+```
+
+You can also make limits dependent on the authenticated user:
+
+```ruby
+def server_sizelimit
+  case @connection.binddn
+  when nil
+    100  # Anonymous: 100 results
+  when /cn=admin/
+    nil  # Admin: unlimited
+  else
+    1000  # Regular users: 1000 results
+  end
+end
+```
+
+## Accessing Connection Information
+
+```ruby
+class MyOperation < LDAP::Server::Operation
+  def search(basedn, scope, deref, filter)
+    # Current bind DN
+    binddn = @connection.binddn
+    
+    # Connection options
+    opts = @connection.opt
+    
+    # Logger
+    log "Search from #{binddn}"
+    debug "Filter: #{filter.inspect}"
+  end
+end
+```
+
+## Working with Filters
+
+Filters are parsed into arrays. Use `LDAP::Server::Filter.run` to test entries:
+
+```ruby
+filter = [:eq, "uid", matchobj, "jdoe"]
+
+entry = {
+  'uid' => ['jdoe'],
+  'cn' => ['John Doe']
+}
+
+if LDAP::Server::Filter.run(filter, entry)
+  send_SearchResultEntry(dn, entry)
+end
+```
+
+Filter examples:
+```ruby
+# (uid=jdoe)
+[:eq, "uid", matchobj, "jdoe"]
+
+# (cn=John*)
+[:substrings, "cn", matchobj, "John", nil]
+
+# (&(uid=jdoe)(objectClass=person))
+[:and, 
+  [:eq, "uid", matchobj, "jdoe"],
+  [:eq, "objectClass", matchobj, "person"]
+]
+
+# (|(uid=jdoe)(mail=jdoe@example.com))
+[:or,
+  [:eq, "uid", matchobj, "jdoe"],
+  [:eq, "mail", matchobj, "jdoe@example.com"]
+]
+```
+
+## Complete Example
+
+From `examples/rbslapd1.rb` - a complete in-memory LDAP server:
+
+```ruby
+#!/usr/bin/env ruby
+require 'ldap/server'
+require 'yaml'
+
+class HashOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, hash)
+    super(connection, messageID)
+    @hash = hash  # Shared directory data
+  end
+
+  def simple_bind(version, dn, password)
+    if version != 3
+      raise LDAP::ResultError::ProtocolError, "version 3 only"
+    end
+    # Accept anonymous or validate password from @hash
+  end
+
+  def search(basedn, scope, deref, filter)
+    basedn = basedn.downcase
+
+    case scope
+    when LDAP::Server::BaseObject
+      obj = @hash[basedn]
+      raise LDAP::ResultError::NoSuchObject unless obj
+      send_SearchResultEntry(basedn, obj) if LDAP::Server::Filter.run(filter, obj)
+
+    when LDAP::Server::WholeSubtree
+      @hash.each do |dn, av|
+        next unless dn.index(basedn, -basedn.length)
+        next unless LDAP::Server::Filter.run(filter, av)
+        send_SearchResultEntry(dn, av)
+      end
+
+    else
+      raise LDAP::ResultError::UnwillingToPerform, "OneLevel not implemented"
+    end
+  end
+
+  def add(dn, av)
+    dn = dn.downcase
+    raise LDAP::ResultError::EntryAlreadyExists if @hash[dn]
+    @hash[dn] = av
+  end
+
+  def del(dn)
+    dn = dn.downcase
+    raise LDAP::ResultError::NoSuchObject unless @hash.has_key?(dn)
+    @hash.delete(dn)
+  end
+
+  def modify(dn, ops)
+    dn = dn.downcase
+    entry = @hash[dn]
+    raise LDAP::ResultError::NoSuchObject unless entry
+    
+    ops.each do |attr, vals|
+      op = vals.shift
+      case op
+      when :add
+        entry[attr] ||= []
+        entry[attr] += vals
+        entry[attr].uniq!
+      when :delete
+        if vals.empty?
+          entry.delete(attr)
+        else
+          vals.each { |v| entry[attr].delete(v) }
+        end
+      when :replace
+        entry[attr] = vals
+      end
+      entry.delete(attr) if entry[attr].empty?
+    end
+  end
+end
+
+# Persistent storage
+directory = {}
+begin
+  File.open("ldapdb.yaml") { |f| directory = YAML.load(f.read) }
+rescue Errno::ENOENT
+end
+
+at_exit do
+  File.open("ldapdb.new", "w") { |f| f.write(YAML.dump(directory)) }
+  File.rename("ldapdb.new", "ldapdb.yaml")
+end
+
+# Start server
+server = LDAP::Server.new(
+  port: 1389,
+  nodelay: true,
+  listen: 10,
+  operation_class: HashOperation,
+  operation_args: [directory]
+)
+
+server.run_tcpserver
+server.join
+```
+
+Test the server:
+
+```bash
+# Search
+ldapsearch -x -H ldap://127.0.0.1:1389/ -b "dc=example,dc=com"
+
+# Add entry
+ldapadd -x -H ldap://127.0.0.1:1389/ <<EOF
+dn: dc=example,dc=com
+objectClass: top
+objectClass: domain
+dc: example
+EOF
+```
+
+## Exception Handling
+
+Operations run in threads and must handle exceptions properly:
+
+```ruby
+def search(basedn, scope, deref, filter)
+  # ... perform search ...
+  
+rescue LDAP::ResultError => e
+  # These are handled automatically - just raise them
+  raise
+  
+rescue Abandon
+  # Client abandoned the operation - no response needed
+  return
+  
+rescue StandardError => e
+  # Catch unexpected errors
+  log_exception(e)
+  raise LDAP::ResultError::OperationsError, e.message
+end
+```
+
+<Note>
+The framework automatically catches exceptions in operation handlers and sends appropriate LDAP error responses. You rarely need to rescue exceptions yourself.
+</Note>
+
+## Logging
+
+Use the built-in logging methods:
+
+```ruby
+def search(basedn, scope, deref, filter)
+  log "Search request for #{basedn}", Logger::INFO
+  debug "Filter: #{filter.inspect}"
+  
+  begin
+    # ... search logic ...
+  rescue StandardError => e
+    log_exception(e)
+    raise
+  end
+end
+```
+
+## Schema Validation
+
+If a schema is configured, use it to validate entries:
+
+```ruby
+def add(dn, av)
+  # Validate against schema
+  if @schema
+    av = @schema.validate(av)
+  end
+  
+  # Store the entry
+  @hash[dn] = av
+end
+
+def modify(dn, ops)
+  entry = @hash[dn]
+  raise LDAP::ResultError::NoSuchObject unless entry
+  
+  # Validate modifications
+  if @schema
+    entry = @schema.validate(ops, entry)
+  end
+  
+  @hash[dn] = entry
+end
+```
+
+See the [Schema guide](/guides/schema) for more details.
+
+## Next Steps
+
+<CardGroup cols={2}>
+<Card title="Request Router" icon="route" href="/guides/request-router">
+Learn about the modern Router approach
+</Card>
+
+<Card title="Threading" icon="arrows-spin" href="/guides/threading">
+Understand thread safety for shared data
+</Card>
+
+<Card title="Schema" icon="diagram-project" href="/guides/schema">
+Add schema validation to your operations
+</Card>
+</CardGroup>

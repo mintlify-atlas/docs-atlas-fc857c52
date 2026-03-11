@@ -1,0 +1,620 @@
+---
+title: Schema
+description: Working with LDAP schemas, defining attribute types and object classes, and validating entries
+---
+
+## Overview
+
+The `LDAP::Server::Schema` class provides support for defining and enforcing LDAP schemas in your server. While ruby-ldapserver doesn't require schemas, they provide:
+
+- Attribute type validation
+- Object class enforcement
+- Syntax checking
+- Remote schema querying (LDAP v3)
+- Automatic subschema subentry publishing
+
+<Note>
+Schemas are optional. If you're using LDAP as a query interface to another database, you may not need schema validation.
+</Note>
+
+## Creating a Schema
+
+<Steps>
+
+<Step title="Create a Schema instance">
+```ruby
+require 'ldap/server/schema'
+
+schema = LDAP::Server::Schema.new
+```
+</Step>
+
+<Step title="Load schema definitions">
+Load the base system schema and additional schema files:
+
+```ruby
+# Load base LDAP schema (includes 'top', 'objectClass', etc.)
+schema.load_system
+
+# Load OpenLDAP-format schema files
+schema.load_file("core.schema")
+schema.load_file("inetorgperson.schema")
+```
+</Step>
+
+<Step title="Resolve OID references">
+After loading all schemas, resolve object identifier references:
+
+```ruby
+schema.resolve_oids
+```
+
+This links objectClass SUP (superior) classes and attribute type references.
+</Step>
+
+<Step title="Configure the server">
+```ruby
+server = LDAP::Server.new(
+  port: 1389,
+  schema: schema,
+  namingContexts: ['dc=example,dc=com']
+)
+```
+</Step>
+
+</Steps>
+
+## Loading Schemas
+
+### System Schema
+
+The system schema includes base LDAP definitions:
+
+```ruby
+schema.load_system
+```
+
+This includes:
+- `top` objectClass
+- `objectClass` attribute
+- `cn`, `userPassword`, `distinguishedName` attributes
+- Operational attributes: `createTimestamp`, `modifyTimestamp`, etc.
+- Schema-related objectClasses and attributes
+
+### Loading from Files
+
+Load OpenLDAP-format schema files:
+
+```ruby
+schema.load_file("path/to/schema.schema")
+```
+
+Schema files contain attribute type and object class definitions in RFC2252 format.
+
+### Loading from Strings
+
+```ruby
+schema_text = <<SCHEMA
+attributetype ( 2.5.4.3 NAME 'cn' 
+  DESC 'RFC2256: common name' 
+  SUP name )
+
+objectclass ( 2.5.6.6 NAME 'person'
+  DESC 'RFC2256: a person'
+  SUP top STRUCTURAL
+  MUST ( sn $ cn )
+  MAY ( userPassword $ telephoneNumber ) )
+SCHEMA
+
+schema.load(schema_text)
+```
+
+## Defining Attribute Types
+
+Attribute types define the properties of LDAP attributes:
+
+```ruby
+schema.add_attrtype(<<ATTR)
+attributetype ( 1.3.6.1.4.1.1466.115.121.1.15
+  NAME 'myCustomAttribute'
+  DESC 'Custom attribute for my application'
+  EQUALITY caseIgnoreMatch
+  SUBSTR caseIgnoreSubstringsMatch
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  SINGLE-VALUE )
+ATTR
+```
+
+### Attribute Type Components
+
+| Component | Description |
+|-----------|-------------|
+| OID | Unique object identifier |
+| NAME | Attribute name(s) |
+| DESC | Human-readable description |
+| SUP | Superior attribute type (inherit properties) |
+| EQUALITY | Matching rule for equality |
+| ORDERING | Matching rule for ordering |
+| SUBSTR | Matching rule for substring |
+| SYNTAX | Syntax OID (data type) |
+| SINGLE-VALUE | Only one value allowed |
+| NO-USER-MODIFICATION | Cannot be modified by clients |
+| USAGE | userApplications, directoryOperation, etc. |
+
+### Common Syntax OIDs
+
+```ruby
+# String types
+'1.3.6.1.4.1.1466.115.121.1.15'  # Directory String
+'1.3.6.1.4.1.1466.115.121.1.26'  # IA5 String
+'1.3.6.1.4.1.1466.115.121.1.44'  # Printable String
+
+# Number types
+'1.3.6.1.4.1.1466.115.121.1.27'  # Integer
+'1.3.6.1.4.1.1466.115.121.1.7'   # Boolean
+
+# Special types
+'1.3.6.1.4.1.1466.115.121.1.12'  # Distinguished Name
+'1.3.6.1.4.1.1466.115.121.1.24'  # Generalized Time
+'1.3.6.1.4.1.1466.115.121.1.40'  # Octet String (binary)
+```
+
+## Defining Object Classes
+
+Object classes define entry types and required/optional attributes:
+
+```ruby
+schema.add_objectclass(<<OC)
+objectclass ( 1.3.6.1.4.1.999.1.2.3
+  NAME 'myOrganization'
+  DESC 'Custom organization class'
+  SUP top
+  STRUCTURAL
+  MUST ( o $ myCustomAttribute )
+  MAY ( description $ telephoneNumber ) )
+OC
+```
+
+### Object Class Components
+
+| Component | Description |
+|-----------|-------------|
+| OID | Unique object identifier |
+| NAME | Class name(s) |
+| DESC | Human-readable description |
+| SUP | Superior class(es) - inherit attributes |
+| STRUCTURAL | Entry's primary type |
+| AUXILIARY | Additional attributes for an entry |
+| ABSTRACT | Cannot be instantiated directly |
+| MUST | Required attributes |
+| MAY | Optional attributes |
+
+### Object Class Types
+
+<Tabs>
+<Tab title="STRUCTURAL">
+The main object class of an entry. Each entry must have exactly one structural class (or a chain of structural classes via SUP).
+
+```ruby
+objectclass ( 2.5.6.6 NAME 'person'
+  SUP top
+  STRUCTURAL
+  MUST ( sn $ cn )
+  MAY ( userPassword $ telephoneNumber ) )
+```
+</Tab>
+
+<Tab title="AUXILIARY">
+Optional classes that add additional attributes to entries.
+
+```ruby
+objectclass ( 1.3.6.1.4.1.1466.101.120.111 NAME 'extensibleObject'
+  DESC 'RFC2252: extensible object'
+  SUP top
+  AUXILIARY )
+```
+</Tab>
+
+<Tab title="ABSTRACT">
+Base classes that cannot be used directly but are inherited by other classes.
+
+```ruby
+objectclass ( 2.5.6.0 NAME 'top'
+  DESC 'top of the superclass chain'
+  ABSTRACT
+  MUST objectClass )
+```
+</Tab>
+</Tabs>
+
+## Validating Entries
+
+Use the schema to validate add and modify operations:
+
+### Validating New Entries
+
+```ruby
+def add(dn, attributes)
+  if @schema
+    # Validate returns normalized entry
+    attributes = @schema.validate(attributes)
+  end
+  
+  # Store the validated entry
+  store_entry(dn, attributes)
+end
+```
+
+Validation checks:
+- All object classes exist in schema
+- Required (MUST) attributes are present
+- All attributes are allowed by object classes
+- Attribute syntax is correct
+- Single-valued constraints are enforced
+- NO-USER-MODIFICATION is respected
+
+### Validating Modifications
+
+```ruby
+def modify(dn, operations)
+  entry = find_entry(dn)
+  raise LDAP::ResultError::NoSuchObject unless entry
+  
+  if @schema
+    # Validate and apply modifications
+    entry = @schema.validate(operations, entry)
+  end
+  
+  update_entry(dn, entry)
+end
+```
+
+### Restricting Attribute Updates
+
+Provide a block to control which attributes can be modified:
+
+```ruby
+def modify(dn, operations)
+  entry = find_entry(dn)
+  
+  if @schema
+    entry = @schema.validate(operations, entry) do |attr|
+      # Return false to forbid modification of this attribute
+      if attr.name == 'createTimestamp'
+        false  # Cannot modify timestamps
+      elsif attr.usage == :directoryOperation
+        false  # Cannot modify operational attributes
+      else
+        true   # Allow
+      end
+    end
+  end
+  
+  update_entry(dn, entry)
+end
+```
+
+## Schema Queries
+
+LDAP v3 clients can query the schema remotely.
+
+### Subschema Subentry
+
+The schema is published as a special subschema entry:
+
+```ruby
+schema = LDAP::Server::Schema.new
+schema.load_system
+
+# Subschema DN (default: "cn=Subschema")
+dn = schema.subschema_dn  # => "cn=Subschema"
+
+# Get subschema entry
+entry = schema.subschema_subentry
+# => {
+#      'objectClass' => ['top', 'subschema', 'extensibleObject'],
+#      'cn' => ['Subschema'],
+#      'objectClasses' => [...],
+#      'attributeTypes' => [...],
+#      'ldapSyntaxes' => [...]
+#    }
+```
+
+Clients can query the schema:
+
+```bash
+ldapsearch -x -H ldap://localhost:1389/ \
+  -b "cn=Subschema" \
+  -s base \
+  "(objectClass=*)" \
+  objectClasses attributeTypes
+```
+
+### Root DSE Advertisement
+
+The schema location is advertised in the root DSE:
+
+```ruby
+server = LDAP::Server.new(
+  port: 1389,
+  schema: schema
+)
+
+# Root DSE will include:
+# subschemaSubentry: cn=Subschema
+```
+
+## Working with Schema Objects
+
+### Finding Attribute Types
+
+```ruby
+# Find by name, alias, or OID
+attr = schema.find_attrtype('cn')
+attr = schema.find_attrtype('commonName')  # Alias
+attr = schema.find_attrtype('2.5.4.3')     # OID
+
+# Access properties
+attr.name        # => "cn"
+attr.names       # => ["cn", "commonName"]
+attr.oid         # => "2.5.4.3"
+attr.syntax      # => Syntax object
+attr.equality    # => MatchingRule object
+attr.singlevalue # => false
+attr.nousermod   # => false
+```
+
+### Finding Object Classes
+
+```ruby
+oc = schema.find_objectclass('person')
+
+oc.name      # => "person"
+oc.names     # => ["person"]
+oc.oid       # => "2.5.6.6"
+oc.struct    # => :structural
+oc.must      # => [AttributeType, ...]
+oc.may       # => [AttributeType, ...]
+oc.sup       # => [ObjectClass, ...]  # Superior classes
+```
+
+### Listing All Definitions
+
+```ruby
+# All attribute types
+schema.all_attrtypes.each do |attr|
+  puts "#{attr.name}: #{attr.desc}"
+end
+
+# All object classes
+schema.all_objectclasses.each do |oc|
+  puts "#{oc.name}: #{oc.desc}"
+end
+```
+
+## Complete Example
+
+From `examples/rbslapd3.rb` - a server with schema support:
+
+```ruby
+#!/usr/bin/env ruby
+require 'ldap/server'
+require 'ldap/server/schema'
+require 'yaml'
+
+class DirOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, dir)
+    super(connection, messageID)
+    @dir = dir
+  end
+
+  def search(basedn, scope, deref, filter)
+    basedn = basedn.downcase
+
+    case scope
+    when LDAP::Server::BaseObject
+      @dir.update
+      obj = @dir.data[basedn]
+      raise LDAP::ResultError::NoSuchObject unless obj
+      send_SearchResultEntry(basedn, obj) if LDAP::Server::Filter.run(filter, obj)
+
+    when LDAP::Server::WholeSubtree
+      @dir.update
+      @dir.data.each do |dn, av|
+        next unless dn.index(basedn, -basedn.length)
+        next unless LDAP::Server::Filter.run(filter, av)
+        send_SearchResultEntry(dn, av)
+      end
+    end
+  end
+
+  def add(dn, entry)
+    # Validate against schema
+    entry = @schema.validate(entry)
+    
+    # Add operational attributes
+    entry['createTimestamp'] = [Time.now.gmtime.strftime("%Y%m%d%H%MZ")]
+    entry['creatorsName'] = [@connection.binddn.to_s]
+    
+    dn = dn.downcase
+    @dir.lock do
+      @dir.update
+      raise LDAP::ResultError::EntryAlreadyExists if @dir.data[dn]
+      @dir.data[dn] = entry
+      @dir.write
+    end
+  end
+
+  def modify(dn, ops)
+    dn = dn.downcase
+    @dir.lock do
+      @dir.update
+      entry = @dir.data[dn]
+      raise LDAP::ResultError::NoSuchObject unless entry
+      
+      # Validate and apply modifications
+      entry = @schema.validate(ops, entry)
+      
+      # Update operational attributes
+      entry['modifyTimestamp'] = [Time.now.gmtime.strftime("%Y%m%d%H%MZ")]
+      entry['modifiersName'] = [@connection.binddn.to_s]
+      
+      @dir.data[dn] = entry
+      @dir.write
+    end
+  end
+end
+
+# Load schema
+schema = LDAP::Server::Schema.new
+schema.load_system
+schema.load_file("core.schema")
+schema.resolve_oids
+
+# Create server
+server = LDAP::Server.new(
+  port: 1389,
+  operation_class: DirOperation,
+  operation_args: [directory],
+  schema: schema,
+  namingContexts: ['dc=example,dc=com']
+)
+
+server.run_prefork
+server.join
+```
+
+Test schema validation:
+
+```bash
+# Add valid entry
+ldapadd -x -H ldap://127.0.0.1:1389/ <<EOF
+dn: dc=example,dc=com
+objectClass: top
+objectClass: domain
+dc: example
+EOF
+
+# Try to add invalid entry (missing required attribute)
+ldapadd -x -H ldap://127.0.0.1:1389/ <<EOF
+dn: cn=John,dc=example,dc=com
+objectClass: person
+cn: John
+EOF
+# Error: Missing attribute sn required by objectClass person
+```
+
+## Schema Format
+
+ruby-ldapserver uses OpenLDAP-format schema files (RFC2252).
+
+### Example Schema File
+
+```ldif
+# Custom schema for myapp
+# Save as: myapp.schema
+
+attributetype ( 1.3.6.1.4.1.99999.1.1.1
+  NAME 'employeeNumber'
+  DESC 'Employee ID number'
+  EQUALITY caseIgnoreMatch
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.4.1.99999.1.1.2
+  NAME 'department'
+  DESC 'Department name'
+  EQUALITY caseIgnoreMatch
+  SUBSTR caseIgnoreSubstringsMatch
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+
+objectclass ( 1.3.6.1.4.1.99999.1.2.1
+  NAME 'employee'
+  DESC 'Employee entry'
+  SUP inetOrgPerson
+  STRUCTURAL
+  MUST ( employeeNumber )
+  MAY ( department ) )
+```
+
+Load it:
+
+```ruby
+schema.load_file("myapp.schema")
+```
+
+<Warning>
+RFC2252 requires elements to appear in a specific order in schema definitions. OpenLDAP is lenient, but ruby-ldapserver is strict. If a schema file fails to load, check that elements are in the correct order (e.g., SUP before MAY).
+</Warning>
+
+## Extensible Objects
+
+The `extensibleObject` class allows entries to have any attributes:
+
+```ruby
+# This entry can have any attributes, bypassing schema validation
+entry = {
+  'objectClass' => ['top', 'extensibleObject'],
+  'customAttr1' => ['value'],
+  'customAttr2' => ['value']
+}
+```
+
+This is useful for:
+- Prototyping
+- Storing arbitrary data
+- Applications that don't fit standard LDAP schemas
+
+## Schema Caching
+
+The subschema entry is cached for performance:
+
+```ruby
+schema = LDAP::Server::Schema.new
+schema.load_system
+
+# First call builds the cache
+entry1 = schema.subschema_subentry
+
+# Add more definitions
+schema.add_attrtype(...)
+
+# Clear cache to rebuild
+schema.changed
+
+# Next call rebuilds with new definitions
+entry2 = schema.subschema_subentry
+```
+
+## Backward Compatibility
+
+The Schema class provides a ruby-ldap compatible API:
+
+```ruby
+# List object class names
+schema.names('objectClasses')  # => ['top', 'person', ...]
+
+# List attribute type names
+schema.names('attributeTypes')  # => ['cn', 'sn', ...]
+
+# Get MUST attributes for an object class
+schema.must('person')  # => ['sn', 'cn']
+
+# Get MAY attributes
+schema.may('person')  # => ['userPassword', 'telephoneNumber', ...]
+
+# Get superior classes
+schema.sup('person')  # => ['top']
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+<Card title="Building Server" icon="server" href="/guides/building-server">
+Learn how to integrate schemas into your server
+</Card>
+
+<Card title="Legacy Operation" icon="clock-rotate-left" href="/guides/legacy-operation">
+Use schemas with the Operation class
+</Card>
+</CardGroup>

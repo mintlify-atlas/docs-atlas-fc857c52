@@ -1,0 +1,227 @@
+---
+title: "LDAP::Server::Filter"
+description: "LDAP filter parsing and matching class"
+---
+
+The `LDAP::Server::Filter` class provides utilities for parsing LDAP search filters from ASN.1 format into an internal representation and running filters against attribute-value hashes.
+
+## Overview
+
+LDAP filters are parsed into a LISP-like internal representation that makes it easier to match filter structures and potentially convert them to other query formats (e.g., SQL).
+
+### Filter Representation
+
+Filters are represented as arrays with the following structures:
+
+- `[:true]` - Always matches
+- `[:false]` - Never matches
+- `[:undef]` - Undefined (three-state boolean logic)
+- `[:and, filter1, filter2, ...]` - Logical AND
+- `[:or, filter1, filter2, ...]` - Logical OR
+- `[:not, filter]` - Logical NOT
+- `[:present, attr]` - Attribute presence check
+- `[:eq, attr, matching_object, val]` - Equality match
+- `[:approx, attr, matching_object, val]` - Approximate match
+- `[:substrings, attr, matching_object, initial, any1, any2, ..., final]` - Substring match
+- `[:ge, attr, matching_object, val]` - Greater than or equal
+- `[:le, attr, matching_object, val]` - Less than or equal
+
+## Class Methods
+
+### parse(asn1, schema = nil)
+
+Parses a filter from OpenSSL::ASN1 format into the internal array representation.
+
+<ParamField path="asn1" type="OpenSSL::ASN1::ASN1Data" required>
+  The ASN.1-encoded filter from an LDAP search request
+</ParamField>
+
+<ParamField path="schema" type="LDAP::Server::Schema">
+  Optional schema object for attribute validation and normalization. If provided, attribute names are normalized and matching objects are included in the filter representation.
+</ParamField>
+
+**Returns:** Array - The parsed filter in internal representation
+
+**Raises:**
+- `LDAP::ResultError::ProtocolError` - If the filter has invalid syntax
+- `LDAP::ResultError::UndefinedAttributeType` - If a schema is provided and an unknown attribute is referenced (returns `[:undef]`)
+
+```ruby
+# Without schema
+filter = LDAP::Server::Filter.parse(asn1_data)
+# => [:eq, "cn", nil, "John Doe"]
+
+# With schema (normalizes attributes and adds matching objects)
+filter = LDAP::Server::Filter.parse(asn1_data, schema)
+# => [:eq, "cn", #<MatchingObject>, "John Doe"]
+```
+
+#### Optimization
+
+The parser performs trivial optimizations:
+- Removes always-true conditions from AND operations
+- Removes always-false conditions from OR operations
+- Simplifies `(objectClass=*)` to `[:true]`
+- Simplifies `(objectClass=top)` (case-insensitive) to `[:true]`
+- Reduces single-element AND/OR to the element itself
+
+```ruby
+# (&(objectClass=*)(cn=foo)) becomes (cn=foo)
+# (|(cn=foo)) becomes (cn=foo)
+```
+
+### run(filter, av)
+
+Runs a parsed filter against an attribute-value hash, implementing LDAP's three-state boolean logic.
+
+<ParamField path="filter" type="Array" required>
+  The parsed filter in internal array representation (from `parse`)
+</ParamField>
+
+<ParamField path="av" type="Hash" required>
+  Hash mapping attribute names (Strings) to arrays of values
+</ParamField>
+
+**Returns:** true, false, or nil - Three-state boolean result
+- `true` - Filter matches
+- `false` - Filter does not match
+- `nil` - Undefined result (e.g., attribute not present when required)
+
+**Raises:**
+- `LDAP::ResultError::OperationsError` - If the filter contains unimplemented operations
+
+```ruby
+filter = [:and, 
+  [:present, "cn"],
+  [:eq, "cn", nil, "John Doe"]
+]
+
+attrs = {
+  "cn" => ["John Doe"],
+  "sn" => ["Doe"],
+  "uid" => ["jdoe"]
+}
+
+result = LDAP::Server::Filter.run(filter, attrs)
+# => true
+```
+
+## Filter Matching Behavior
+
+### Three-State Boolean Logic
+
+LDAP uses three-state boolean logic (true, false, undefined) as defined in RFC 2251 section 4.5.1:
+
+**AND operation:**
+- Returns `false` if any element is `false`
+- Returns `nil` if any element is `nil` and none are `false`
+- Returns `true` if all elements are `true`
+
+**OR operation:**
+- Returns `true` if any element is `true`
+- Returns `nil` if any element is `nil` and none are `true`
+- Returns `false` if all elements are `false`
+
+**NOT operation:**
+- `NOT true` = `false`
+- `NOT false` = `true`
+- `NOT nil` = `nil`
+
+### Matching Objects
+
+When a schema is provided during parsing, matching objects are embedded in the filter representation. These objects implement the actual matching logic for different attribute types.
+
+If no schema is provided, the matching object is `nil`, and you can use `LDAP::Server::MatchingRule::DefaultMatch` for basic string matching.
+
+```ruby
+# Filter with matching object
+[:eq, "cn", matching_object, "value"]
+
+# The matching_object responds to methods like:
+# - eq(values, test_value) - equality matching
+# - le(values, test_value) - less than or equal
+# - ge(values, test_value) - greater than or equal
+# - substrings(values, initial, *any, final) - substring matching
+```
+
+## Examples
+
+### Parsing and Running a Simple Filter
+
+```ruby
+# Parse an equality filter
+filter = LDAP::Server::Filter.parse(asn1_equality_filter)
+# => [:eq, "uid", nil, "jdoe"]
+
+# Run against entry attributes
+entry = {"uid" => ["jdoe"], "cn" => ["John Doe"]}
+LDAP::Server::Filter.run(filter, entry)  # => true
+
+other_entry = {"uid" => ["asmith"], "cn" => ["Alice Smith"]}
+LDAP::Server::Filter.run(filter, other_entry)  # => false
+```
+
+### Parsing a Complex Filter
+
+```ruby
+# (&(objectClass=person)(|(cn=John*)(sn=Doe)))
+filter = LDAP::Server::Filter.parse(asn1_complex_filter)
+# => [:and,
+#      [:eq, "objectClass", nil, "person"],
+#      [:or,
+#        [:substrings, "cn", nil, "John", nil],
+#        [:eq, "sn", nil, "Doe"]]]
+
+entry = {
+  "objectClass" => ["person", "inetOrgPerson"],
+  "cn" => ["John Smith"],
+  "sn" => ["Smith"]
+}
+
+LDAP::Server::Filter.run(filter, entry)  # => true
+```
+
+### Handling Undefined Results
+
+```ruby
+filter = [:present, "mail"]
+
+entry_with_mail = {"cn" => ["John"], "mail" => ["john@example.com"]}
+LDAP::Server::Filter.run(filter, entry_with_mail)  # => true
+
+entry_without_mail = {"cn" => ["John"]}
+LDAP::Server::Filter.run(filter, entry_without_mail)  # => false
+```
+
+### Using with Schema
+
+```ruby
+schema = LDAP::Server::Schema.new
+schema.load_file("openldap.schema")
+
+# Parse with schema normalization
+filter = LDAP::Server::Filter.parse(asn1_filter, schema)
+# Attribute names are normalized: "CommonName" => "cn"
+# Matching objects are included for proper comparison
+```
+
+## Filter ASN.1 Tag Reference
+
+The `parse` method recognizes the following ASN.1 tags:
+
+- Tag 0: AND filter
+- Tag 1: OR filter
+- Tag 2: NOT filter
+- Tag 3: equalityMatch
+- Tag 4: substrings (with sub-tags 0=initial, 1=any, 2=final)
+- Tag 5: greaterOrEqual
+- Tag 6: lessOrEqual
+- Tag 7: present
+- Tag 8: approxMatch
+- Tag 9: extensibleMatch (not yet implemented)
+
+## See Also
+
+- [Schema](/api/schema) - Schema definitions for attribute validation
+- [Operation](/api/operation) - LDAP operation handling
+- [Syntax](/api/syntax) - Attribute syntax validation

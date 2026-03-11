@@ -1,0 +1,301 @@
+---
+title: "LDAP::Server::DN"
+description: "DN parsing and manipulation class"
+---
+
+The `LDAP::Server::DN` class provides utilities for parsing, manipulating, and querying LDAP Distinguished Names (DNs).
+
+## Overview
+
+The DN class parses LDAP Distinguished Names into an internal array representation and provides methods for searching, comparing, and extracting values from DNs. It includes the `Enumerable` module for iteration support.
+
+## Constructor
+
+### new(dn)
+
+Creates a new DN object by parsing a DN string.
+
+<ParamField path="dn" type="String" required>
+  The Distinguished Name string to parse (e.g., "uid=user,ou=Users,dc=example,dc=com")
+</ParamField>
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+```
+
+## Class Methods
+
+### join(elements)
+
+Combines a set of elements into a syntactically correct DN string.
+
+<ParamField path="elements" type="Array" required>
+  Array of DN elements, where each element can be either a Hash `{ attr => val }` or an Array `[attr, val]`
+</ParamField>
+
+**Returns:** String - The joined DN string
+
+```ruby
+elements = [{"uid" => "jdoe"}, {"ou" => "Users"}, {"dc" => "example"}]
+dn_string = LDAP::Server::DN.join(elements)
+# => "uid=jdoe,ou=Users,dc=example"
+```
+
+## Instance Methods
+
+### dname
+
+Returns the parsed DN as an array of hashes.
+
+**Returns:** Array - Array of Hash objects representing the DN components
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.dname
+# => [{"uid"=>"jdoe"}, {"ou"=>"Users"}, {"dc"=>"example"}, {"dc"=>"com"}]
+```
+
+### find_first(attr)
+
+Returns the value of the first occurrence of an attribute (bottom-up traversal).
+
+<ParamField path="attr" type="String" required>
+  The attribute name to search for
+</ParamField>
+
+**Returns:** String or nil - The attribute value, or nil if not found
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.find_first("dc")  # => "example"
+dn.find_first("cn")  # => nil
+```
+
+### find_last(attr)
+
+Returns the value of the last occurrence of an attribute (bottom-up traversal).
+
+<ParamField path="attr" type="String" required>
+  The attribute name to search for
+</ParamField>
+
+**Returns:** String or nil - The attribute value, or nil if not found
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.find_last("dc")  # => "com"
+```
+
+### find(attr)
+
+Returns all values of all occurrences of an attribute (bottom-up order).
+
+<ParamField path="attr" type="String" required>
+  The attribute name to search for
+</ParamField>
+
+**Returns:** Array - Array of all matching attribute values
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.find("dc")  # => ["example", "com"]
+```
+
+### find_nth(attr, n)
+
+Returns the value of the n-th occurrence of an attribute (top-down, 0-indexed).
+
+<ParamField path="attr" type="String" required>
+  The attribute name to search for
+</ParamField>
+
+<ParamField path="n" type="Integer" required>
+  The zero-based index of the occurrence to return
+</ParamField>
+
+**Returns:** String or nil - The attribute value, or nil if not found
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.find_nth("dc", 0)  # => "example"
+dn.find_nth("dc", 1)  # => "com"
+dn.find_nth("dc", 2)  # => nil
+```
+
+### start_with?(dn)
+
+Checks whether the DN starts with another DN (bottom-up comparison). Values are case-sensitive.
+
+<ParamField path="dn" type="String" required>
+  The DN string to check as a prefix
+</ParamField>
+
+**Returns:** Boolean
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.start_with?("uid=jdoe,ou=Users")  # => true
+dn.start_with?("ou=Users")           # => false
+```
+
+### start_with_format?(dn)
+
+Checks whether the DN starts with a format pattern (bottom-up comparison). Only attribute names are compared; values are ignored.
+
+<ParamField path="dn" type="String" required>
+  The DN format string to check
+</ParamField>
+
+**Returns:** Boolean
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.start_with_format?("uid=anything,ou=anything")  # => true
+```
+
+### end_with?(dn)
+
+Checks whether the DN ends with another DN (top-down comparison). Values are case-sensitive.
+
+<ParamField path="dn" type="String" required>
+  The DN string to check as a suffix
+</ParamField>
+
+**Returns:** Boolean
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.end_with?("dc=example,dc=com")  # => true
+dn.end_with?("dc=com")              # => true
+```
+
+### end_with_format?(dn)
+
+Checks whether the DN ends with a format pattern (top-down comparison). Only attribute names are compared; values are ignored.
+
+<ParamField path="dn" type="String" required>
+  The DN format string to check
+</ParamField>
+
+**Returns:** Boolean
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.end_with_format?("dc=anything,dc=anything")  # => true
+```
+
+### equal?(dn)
+
+Checks whether the DN exactly equals another DN. Values are case-sensitive.
+
+<ParamField path="dn" type="String" required>
+  The DN string to compare
+</ParamField>
+
+**Returns:** Boolean
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.equal?("uid=jdoe,ou=Users,dc=example,dc=com")  # => true
+dn.equal?("uid=JDOE,ou=Users,dc=example,dc=com")  # => false
+```
+
+### equal_format?(dn)
+
+Checks whether the DN has the same format as another DN. Only attribute names are compared; values are ignored.
+
+<ParamField path="dn" type="String" required>
+  The DN format string to compare
+</ParamField>
+
+**Returns:** Boolean
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.equal_format?("uid=anyone,ou=anything,dc=any,dc=domain")  # => true
+```
+
+### include?(dn)
+
+Checks whether the DN contains a substring equal to another DN. Values are case-sensitive.
+
+<ParamField path="dn" type="String" required>
+  The DN substring to search for
+</ParamField>
+
+**Returns:** Boolean
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.include?("ou=Users,dc=example")  # => true
+```
+
+### include_format?(dn)
+
+Checks whether the DN contains a substring with a matching format. Only attribute names are compared; values are ignored.
+
+<ParamField path="dn" type="String" required>
+  The DN format substring to search for
+</ParamField>
+
+**Returns:** Boolean
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.include_format?("ou=anything,dc=anything")  # => true
+```
+
+### parse(template_dn)
+
+Generates a mapping of variables from a template DN. Variables in the template are prefixed with `:` (e.g., `:uid`).
+
+<ParamField path="template_dn" type="String" required>
+  The template DN string containing variable placeholders (e.g., "uid=:uid,ou=:category")
+</ParamField>
+
+**Returns:** Hash - A hash mapping symbols to their extracted values
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+vars = dn.parse("uid=:uid,ou=:category,dc=example,dc=com")
+# => {:uid => "jdoe", :category => "Users"}
+```
+
+### each(&block)
+
+Iterates over each DN component (bottom-up). Part of the `Enumerable` interface.
+
+<ParamField path="block" type="Block" required>
+  Block to execute for each DN component
+</ParamField>
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.each { |component| puts component.inspect }
+# {"uid"=>"jdoe"}
+# {"ou"=>"Users"}
+# {"dc"=>"example"}
+# {"dc"=>"com"}
+```
+
+### reverse_each(&block)
+
+Iterates over each DN component in reverse order (top-down).
+
+<ParamField path="block" type="Block" required>
+  Block to execute for each DN component
+</ParamField>
+
+```ruby
+dn = LDAP::Server::DN.new("uid=jdoe,ou=Users,dc=example,dc=com")
+dn.reverse_each { |component| puts component.inspect }
+# {"dc"=>"com"}
+# {"dc"=>"example"}
+# {"ou"=>"Users"}
+# {"uid"=>"jdoe"}
+```
+
+## See Also
+
+- [Operation](/api/operation) - DN splitting and joining operations
+- [Server](/api/server) - Main server class

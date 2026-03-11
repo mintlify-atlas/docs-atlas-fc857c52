@@ -1,0 +1,426 @@
+---
+title: Building an LDAP Server
+description: Complete guide to building an LDAP server from scratch with ruby-ldapserver
+---
+
+## Overview
+
+ruby-ldapserver is a lightweight, pure Ruby framework for implementing LDAP server applications. It's designed primarily for building gateways from LDAP queries into other protocols or databases.
+
+<Note>
+ruby-ldapserver benefits from Ruby's threading engine and is intended for technically-savvy Ruby developers who are comfortable reading RFCs and working with protocol implementations.
+</Note>
+
+## Creating Your First Server
+
+<Steps>
+
+<Step title="Install dependencies">
+ruby-ldapserver requires the `openssl` extension (standard in Ruby 1.8.2+):
+
+```bash
+ruby -ropenssl -e puts
+```
+
+If this fails, you may need to rebuild Ruby with OpenSSL support.
+</Step>
+
+<Step title="Create a basic server">
+The simplest LDAP server uses the Router approach (recommended) or the legacy Operation class approach.
+
+Here's a minimal example using the Router:
+
+```ruby
+require 'ldap/server'
+require 'ldap/server/router'
+
+$logger = Logger.new($stderr)
+
+class LDAPController
+  def self.bind(request, version, dn, password, params)
+    $logger.info "Processing bind for '#{dn}'"
+    # Accept anonymous binds
+    return if dn.nil?
+    # Add your authentication logic here
+  end
+
+  def self.search(request, baseObject, scope, deref, filter, params)
+    $logger.info "Processing search for #{baseObject}"
+    # Return search results
+    request.send_SearchResultEntry("cn=example,#{baseObject}", {
+      'cn' => ['example'],
+      'objectClass' => ['top']
+    })
+  end
+end
+
+router = LDAP::Server::Router.new($logger) do
+  bind nil => "LDAPController#bind"
+  search "dc=example,dc=com" => "LDAPController#search"
+end
+
+server = LDAP::Server.new(
+  port: 1389,
+  nodelay: true,
+  router: router
+)
+
+server.run_tcpserver
+server.join
+```
+</Step>
+
+<Step title="Test your server">
+Use standard LDAP tools to test:
+
+```bash
+ldapsearch -x -H ldap://127.0.0.1:1389/ -b "dc=example,dc=com"
+```
+</Step>
+
+</Steps>
+
+## Configuration Options
+
+The `LDAP::Server.new` constructor accepts a hash of configuration options:
+
+### Network Configuration
+
+<CodeGroup>
+
+```ruby TCP Socket
+server = LDAP::Server.new(
+  bindaddr: '127.0.0.1',  # Default: '0.0.0.0'
+  port: 1389,              # Required for TCP
+  listen: 10,              # Socket backlog (default: 5)
+  nodelay: true            # TCP_NODELAY option
+)
+```
+
+```ruby UNIX Socket
+server = LDAP::Server.new(
+  socket: '/tmp/ldap.sock',  # Cannot be combined with bindaddr/port
+  listen: 10
+)
+```
+
+</CodeGroup>
+
+### Privilege Dropping
+
+<Warning>
+These options allow the server to bind to privileged ports (like 389) as root, then drop privileges for security.
+</Warning>
+
+<CodeGroup>
+
+```ruby By Username/Group
+server = LDAP::Server.new(
+  port: 389,
+  user: 'ldap',   # Drop to this user
+  group: 'ldap'   # Drop to this group
+)
+```
+
+```ruby By UID/GID
+server = LDAP::Server.new(
+  port: 389,
+  uid: 1000,  # Drop to this UID
+  gid: 1000   # Drop to this GID
+)
+```
+
+</CodeGroup>
+
+### Request Routing
+
+<Tabs>
+<Tab title="Router (Recommended)">
+```ruby
+server = LDAP::Server.new(
+  router: my_router,  # Router instance
+  port: 1389
+)
+```
+
+See the [Request Router guide](/guides/request-router) for details.
+</Tab>
+
+<Tab title="Legacy Operation">
+```ruby
+server = LDAP::Server.new(
+  operation_class: MyOperation,    # Class inheriting from LDAP::Server::Operation
+  operation_args: [arg1, arg2],    # Arguments passed to Operation.new
+  port: 1389
+)
+```
+
+See the [Legacy Operation guide](/guides/legacy-operation) for details.
+</Tab>
+</Tabs>
+
+### Schema and Naming Contexts
+
+```ruby
+schema = LDAP::Server::Schema.new
+schema.load_system
+schema.load_file("core.schema")
+schema.resolve_oids
+
+server = LDAP::Server.new(
+  schema: schema,
+  namingContexts: ['dc=example,dc=com'],
+  port: 1389
+)
+```
+
+See the [Schema guide](/guides/schema) for more details.
+
+### SSL/TLS Configuration
+
+```ruby
+server = LDAP::Server.new(
+  ssl_key_file: 'key.pem',
+  ssl_cert_file: 'cert.pem',
+  ssl_on_connect: true,           # Use LDAPS (LDAP over SSL)
+  ssl_ca_path: '/path/to/ca',     # For client certificate verification
+  ssl_verify_mode: OpenSSL::SSL::VERIFY_PEER,
+  port: 636                       # Standard LDAPS port
+)
+```
+
+See the [SSL/TLS guide](/guides/ssl-tls) for certificate generation and configuration.
+
+### Attribute Range Limiting
+
+Limit the number of attribute values returned in query results (useful for large multi-valued attributes):
+
+```ruby
+server = LDAP::Server.new(
+  attribute_range_limit: 1500,  # Microsoft Active Directory uses this
+  port: 1389
+)
+```
+
+Clients can request specific ranges using the syntax: `attribute;range=0-1499`
+
+### Logging
+
+```ruby
+logger = Logger.new($stderr)
+logger.level = Logger::INFO
+
+server = LDAP::Server.new(
+  logger: logger,
+  port: 1389
+)
+```
+
+## Server Modes
+
+ruby-ldapserver supports two operational modes:
+
+### Threading Mode (Default)
+
+```ruby
+server.run_tcpserver
+server.join
+```
+
+Creates a new Ruby thread for each client connection. Each LDAP operation within a connection runs in its own thread.
+
+**Advantages:**
+- Simpler to implement
+- Connections can share state in RAM
+- Lower overhead per connection
+
+**Considerations:**
+- All operations run on a single CPU core
+- Some Ruby C extensions may block the interpreter
+- Must ensure thread-safe access to shared resources
+
+See the [Threading guide](/guides/threading) for thread safety considerations.
+
+### Prefork Mode
+
+```ruby
+server.run_prefork
+server.join
+```
+
+<Note>
+Requires the `prefork` gem: `gem install prefork`
+</Note>
+
+Pre-forks multiple worker processes, each handling client connections:
+
+```ruby
+server = LDAP::Server.new(
+  port: 1389,
+  min_servers: 5,
+  max_servers: 20,
+  max_request_per_child: 1000,
+  max_idle: 60
+)
+server.run_prefork
+server.join
+```
+
+**Advantages:**
+- Better scalability on multi-CPU systems
+- No Ruby threading issues
+- Better isolation between connections
+
+**Considerations:**
+- Connections cannot share state in RAM
+- Higher memory overhead
+- Must synchronize data access via external mechanisms (files, databases, etc.)
+
+See the [Threading guide](/guides/threading) for a detailed comparison.
+
+## Root DSE
+
+The server automatically publishes a root DSE (Directory Service Entry) at DN "":
+
+```ruby
+server = LDAP::Server.new(port: 1389)
+
+# Root DSE includes:
+# - supportedLDAPVersion: ['3']
+# - namingContexts: (if configured)
+# - subschemaSubentry: (if schema configured)
+
+# Access the root DSE object:
+server.root_dse['vendorName'] = ['MyCompany']
+server.root_dse['vendorVersion'] = ['1.0.0']
+```
+
+Clients can query the root DSE:
+
+```bash
+ldapsearch -x -H ldap://localhost:1389/ -b "" -s base "(objectclass=*)"
+```
+
+## Complete Example
+
+Here's a complete in-memory LDAP server from `examples/rbslapd1.rb`:
+
+```ruby
+require 'ldap/server'
+
+class HashOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, hash)
+    super(connection, messageID)
+    @hash = hash
+  end
+
+  def simple_bind(version, dn, password)
+    raise LDAP::ResultError::ProtocolError, "version 3 only" if version != 3
+    # Accept anonymous or validate credentials
+  end
+
+  def search(basedn, scope, deref, filter)
+    basedn = basedn.downcase
+
+    case scope
+    when LDAP::Server::BaseObject
+      obj = @hash[basedn]
+      raise LDAP::ResultError::NoSuchObject unless obj
+      send_SearchResultEntry(basedn, obj) if LDAP::Server::Filter.run(filter, obj)
+
+    when LDAP::Server::WholeSubtree
+      @hash.each do |dn, av|
+        next unless dn.index(basedn, -basedn.length)
+        next unless LDAP::Server::Filter.run(filter, av)
+        send_SearchResultEntry(dn, av)
+      end
+
+    else
+      raise LDAP::ResultError::UnwillingToPerform, "OneLevel not implemented"
+    end
+  end
+
+  def add(dn, av)
+    dn = dn.downcase
+    raise LDAP::ResultError::EntryAlreadyExists if @hash[dn]
+    @hash[dn] = av
+  end
+
+  def del(dn)
+    dn = dn.downcase
+    raise LDAP::ResultError::NoSuchObject unless @hash.has_key?(dn)
+    @hash.delete(dn)
+  end
+
+  def modify(dn, ops)
+    dn = dn.downcase
+    entry = @hash[dn]
+    raise LDAP::ResultError::NoSuchObject unless entry
+    
+    ops.each do |attr, vals|
+      op = vals.shift
+      case op
+      when :add
+        entry[attr] ||= []
+        entry[attr] += vals
+        entry[attr].uniq!
+      when :delete
+        if vals.empty?
+          entry.delete(attr)
+        else
+          vals.each { |v| entry[attr].delete(v) }
+        end
+      when :replace
+        entry[attr] = vals
+      end
+      entry.delete(attr) if entry[attr].empty?
+    end
+  end
+end
+
+# Persistent storage
+directory = {}
+require 'yaml'
+
+begin
+  File.open("ldapdb.yaml") { |f| directory = YAML.load(f.read) }
+rescue Errno::ENOENT
+end
+
+at_exit do
+  File.open("ldapdb.new", "w") { |f| f.write(YAML.dump(directory)) }
+  File.rename("ldapdb.new", "ldapdb.yaml")
+end
+
+# Start server
+server = LDAP::Server.new(
+  port: 1389,
+  nodelay: true,
+  listen: 10,
+  operation_class: HashOperation,
+  operation_args: [directory]
+)
+
+server.run_tcpserver
+server.join
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+<Card title="Request Router" icon="route" href="/guides/request-router">
+Learn about the modern Router approach for handling LDAP operations
+</Card>
+
+<Card title="Schema" icon="diagram-project" href="/guides/schema">
+Define and validate LDAP schemas for your server
+</Card>
+
+<Card title="SSL/TLS" icon="lock" href="/guides/ssl-tls">
+Secure your LDAP server with SSL/TLS encryption
+</Card>
+
+<Card title="Performance" icon="gauge-high" href="/guides/performance">
+Optimize your server for production workloads
+</Card>
+</CardGroup>

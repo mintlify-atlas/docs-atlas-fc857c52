@@ -1,0 +1,141 @@
+---
+title: Introduction
+description: Overview of ruby-ldapserver, a pure Ruby framework for implementing LDAP servers
+---
+
+## What is ruby-ldapserver?
+
+ruby-ldapserver is a lightweight, pure Ruby framework for implementing LDAP server applications. It provides a complete implementation of the LDAP protocol message encoding and decoding components, allowing you to build custom LDAP servers without dealing with low-level protocol details.
+
+The framework is written entirely in Ruby and benefits from Ruby's threading engine, making it ideal for building LDAP gateways into other protocols or databases.
+
+<Note>
+  ruby-ldapserver does not attempt to be a full implementation of the standard LDAP data model itself. Instead, it provides the protocol layer that you can use to build your own LDAP server applications.
+</Note>
+
+## Target Audience
+
+This framework is designed for:
+
+- **Technically-savvy Ruby developers** who are comfortable reading RFCs and source code
+- **Developers building LDAP gateways** into other protocols or databases
+- **Teams needing custom LDAP functionality** beyond what standard LDAP servers provide
+- **Applications requiring LDAP interfaces** to non-LDAP data sources
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Pure Ruby Implementation" icon="gem">
+    Written entirely in Ruby with no external dependencies beyond the standard OpenSSL extension
+  </Card>
+  
+  <Card title="Request Router" icon="route">
+    Modern routing system that maps parameterized routes (DNs) and actions to controller actions for maintainable code
+  </Card>
+  
+  <Card title="Threading Support" icon="layer-group">
+    Built-in support for concurrent client connections using Ruby's threading engine
+  </Card>
+  
+  <Card title="SSL/TLS Support" icon="lock">
+    Native support for secure LDAP connections with SSL/TLS encryption
+  </Card>
+  
+  <Card title="Flexible Architecture" icon="cubes">
+    Support for both modern router-based and legacy Operation class patterns
+  </Card>
+  
+  <Card title="Schema Support" icon="sitemap">
+    Optional schema validation and enforcement for LDAP data model compliance
+  </Card>
+</CardGroup>
+
+## Use Cases
+
+ruby-ldapserver excels at:
+
+### LDAP to Database Gateways
+
+Create LDAP interfaces to SQL databases, NoSQL stores, or other data sources. For example:
+- Expose MySQL user tables via LDAP for authentication
+- Provide LDAP search capabilities over MongoDB collections
+- Bridge LDAP queries to REST APIs
+
+### Custom LDAP Servers
+
+Build specialized LDAP servers with custom logic:
+- Implement custom authentication schemes
+- Add business logic to LDAP operations
+- Create virtual directory services
+
+### Protocol Translation
+
+Translate LDAP operations into other protocols:
+- Forward LDAP bind requests to OAuth providers
+- Convert LDAP searches to GraphQL queries
+- Bridge LDAP to proprietary authentication systems
+
+## Architecture Overview
+
+The framework consists of several key components:
+
+- **`LDAP::Server`** - Main server class that handles TCP connections and configuration
+- **`LDAP::Server::Connection`** - Manages communication with a single client
+- **`LDAP::Server::Operation`** - Handles individual LDAP requests (search, bind, modify, etc.)
+- **Request Router** - Modern routing system for mapping DNs to controller actions
+
+```ruby
+# High-level architecture
+Client → TCP Connection → LDAP::Server::Connection → Operation/Router → Your Code
+```
+
+## Protocol Implementation
+
+ruby-ldapserver provides:
+
+- ✅ Complete LDAP message encoding/decoding
+- ✅ Support for all standard LDAP operations (bind, search, add, modify, delete, compare)
+- ✅ Filter parsing and evaluation
+- ✅ SSL/TLS support
+- ✅ Concurrent request handling
+- ✅ Optional schema validation
+
+<Warning>
+  The framework does not directly enforce the LDAP data model. Schema validation is available but optional. If you're using LDAP as a query interface to another database, you may choose to violate LDAP specifications at your own risk.
+</Warning>
+
+## Performance
+
+In benchmark tests (single-processor AMD Athlon 2500+), ruby-ldapserver achieved:
+
+- **800 searches/second** with single client (N=1, M=1000)
+- **300-400 searches/second** with 10 concurrent clients (N=10, M=100)
+
+<Note>
+  Performance will vary based on your hardware, Ruby version, and implementation complexity. These benchmarks represent the framework overhead without application logic.
+</Note>
+
+## Threading Considerations
+
+ruby-ldapserver creates a new Ruby thread for each LDAP operation, allowing multiple overlapping requests on the same connection. This means:
+
+- Your operation handlers must be **thread-safe** when accessing shared data
+- Use `Mutex` and other synchronization primitives for shared state
+- Consider using thread-safe client libraries (pure Ruby implementations preferred)
+- DNS lookups can block threads - use `require 'resolv-replace'` for non-blocking DNS
+
+<Warning>
+  Some Ruby extension libraries block the threading interpreter. For example, `ruby-ldap` (C wrapper) blocks, while pure Ruby MySQL clients like `ruby-mysql` work well with threading.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install ruby-ldapserver and configure your environment
+  </Card>
+  
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Build your first LDAP server in minutes
+  </Card>
+</CardGroup>

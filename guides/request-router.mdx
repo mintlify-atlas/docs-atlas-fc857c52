@@ -1,0 +1,411 @@
+---
+title: Request Router
+description: Modern routing approach using the Router class for flexible LDAP request handling
+---
+
+## Overview
+
+The Router class provides a clean, Rails-like routing system for mapping LDAP operations to controller methods. It's the recommended approach for new applications, offering better code organization and maintainability than the legacy Operation class.
+
+<Note>
+The Router approach was introduced as a modern alternative to subclassing `LDAP::Server::Operation`. For legacy applications, see the [Legacy Operation guide](/guides/legacy-operation).
+</Note>
+
+## Basic Router Setup
+
+<Steps>
+
+<Step title="Create a Router instance">
+The Router is initialized with a logger and a block defining your routes:
+
+```ruby
+require 'ldap/server/router'
+
+logger = Logger.new($stderr)
+
+router = LDAP::Server::Router.new(logger) do
+  # Define routes here
+end
+```
+</Step>
+
+<Step title="Define controller methods">
+Create class methods that will handle LDAP operations:
+
+```ruby
+class LDAPController
+  def self.bind(request, version, dn, password, params)
+    logger.info "Bind request for #{dn}"
+    # Handle authentication
+  end
+
+  def self.search(request, baseObject, scope, deref, filter, params)
+    logger.info "Search request for #{baseObject}"
+    # Handle search and send results
+  end
+end
+```
+</Step>
+
+<Step title="Map routes to controllers">
+Use the DSL to map DNs and operations to controller methods:
+
+```ruby
+router = LDAP::Server::Router.new(logger) do
+  bind nil => "LDAPController#bind"
+  search "dc=example,dc=com" => "LDAPController#search"
+end
+```
+</Step>
+
+<Step title="Create and run the server">
+```ruby
+server = LDAP::Server.new(
+  port: 1389,
+  router: router
+)
+
+server.run_tcpserver
+server.join
+```
+</Step>
+
+</Steps>
+
+## Route Definition
+
+Routes map Distinguished Names (DNs) and LDAP operations to controller actions.
+
+### Route Syntax
+
+The basic syntax uses the operation name as a method:
+
+```ruby
+router = LDAP::Server::Router.new(logger) do
+  # operation dn => "ClassName#method_name"
+  bind "uid=admin,dc=example,dc=com" => "AdminController#authenticate"
+  search "ou=users,dc=example,dc=com" => "UserController#search_users"
+end
+```
+
+### Supported Operations
+
+The Router supports all LDAP operations:
+
+- `bind` - Authentication requests
+- `search` - Search operations
+- `add` - Add new entries
+- `modify` - Modify existing entries
+- `modifydn` - Rename/move entries
+- `del` - Delete entries
+- `compare` - Compare attribute values
+
+### Catch-All Routes
+
+Use `nil` as the DN to create a catch-all route:
+
+```ruby
+router = LDAP::Server::Router.new(logger) do
+  # Catches all bind requests not matched by other routes
+  bind nil => "LDAPController#default_bind"
+  
+  # Catches all search requests
+  search nil => "LDAPController#default_search"
+end
+```
+
+### Alternative Syntax
+
+You can also use the `route` method explicitly:
+
+```ruby
+router = LDAP::Server::Router.new(logger) do
+  route :bind, "uid=admin,dc=example,dc=com" => "AdminController#auth"
+  route :search, nil => "LDAPController#search"
+end
+```
+
+## Parameterized Routes
+
+Routes can contain named parameters that extract values from the DN:
+
+```ruby
+router = LDAP::Server::Router.new(logger) do
+  bind "uid=:uid,ou=Users,dc=mydomain,dc=com" => "UserController#authenticate"
+  search "ou=:department,dc=company,dc=com" => "DeptController#search"
+end
+
+class UserController
+  def self.authenticate(request, version, dn, password, params)
+    # params[:uid] contains the extracted value
+    uid = params[:uid]
+    logger.info "Authenticating user: #{uid}"
+    
+    # Validate credentials
+    if valid_credentials?(uid, password)
+      # Success - return normally
+      return
+    else
+      raise LDAP::ResultError::InvalidCredentials
+    end
+  end
+end
+```
+
+## Controller Method Signatures
+
+Each LDAP operation has a specific method signature:
+
+### Bind Operation
+
+```ruby
+def self.bind(request, version, dn, password, params)
+  # request: Request object for sending responses
+  # version: LDAP protocol version (typically 3)
+  # dn: Distinguished Name being authenticated (nil for anonymous)
+  # password: Password provided by client
+  # params: Hash of extracted route parameters
+  
+  # Raise exception to reject bind
+  raise LDAP::ResultError::InvalidCredentials, "Bad password"
+  
+  # Return normally to accept bind
+end
+```
+
+<Note>
+Bind responses are automatically sent by the Router. Just raise an exception to reject the bind, or return normally to accept it.
+</Note>
+
+### Search Operation
+
+```ruby
+def self.search(request, baseObject, scope, deref, filter, params)
+  # request: Request object for sending results
+  # baseObject: Base DN for the search
+  # scope: Search scope (0=base, 1=one level, 2=subtree)
+  # deref: Alias dereferencing (0=never, 1=searching, 2=finding, 3=always)
+  # filter: Parsed filter object
+  # params: Hash of extracted route parameters
+  
+  # Send each matching entry
+  request.send_SearchResultEntry("cn=John Doe,ou=Users,dc=example,dc=com", {
+    'cn' => ['John Doe'],
+    'mail' => ['john@example.com'],
+    'objectClass' => ['person', 'inetOrgPerson']
+  })
+  
+  # The SearchResultDone is sent automatically
+end
+```
+
+### Scope Constants
+
+Search scope values are available as constants:
+
+```ruby
+LDAP::Server::Router::BaseObject    # 0 - search just the base entry
+LDAP::Server::Router::SingleLevel   # 1 - search one level below base
+LDAP::Server::Router::WholeSubtree  # 2 - search entire subtree
+```
+
+### DerefAliases Constants
+
+```ruby
+LDAP::Server::Router::NeverDerefAliases   # 0
+LDAP::Server::Router::DerefInSearching    # 1
+LDAP::Server::Router::DerefFindingBaseObj # 2
+LDAP::Server::Router::DerefAlways         # 3
+```
+
+## Request Object
+
+The `request` parameter is an instance of `LDAP::Server::Request` with methods for sending responses:
+
+### Search Results
+
+```ruby
+# Send a search result entry
+request.send_SearchResultEntry(dn, attributes)
+
+# attributes is a hash: { 'attr' => ['value1', 'value2'], ... }
+request.send_SearchResultEntry(
+  "uid=jdoe,ou=Users,dc=example,dc=com",
+  {
+    'uid' => ['jdoe'],
+    'cn' => ['John Doe'],
+    'mail' => ['john.doe@example.com'],
+    'objectClass' => ['inetOrgPerson', 'person', 'top']
+  }
+)
+```
+
+### Bind Responses
+
+<Note>
+Bind responses are handled automatically by the Router. You only need to raise exceptions for errors.
+</Note>
+
+### Working with Filters
+
+Filters are parsed into Ruby arrays. Use the Filter.run method to test entries:
+
+```ruby
+filter = [:eq, "uid", matchobj, "jdoe"]  # (uid=jdoe)
+
+entry = {
+  'uid' => ['jdoe'],
+  'cn' => ['John Doe']
+}
+
+if LDAP::Server::Filter.run(filter, entry)
+  request.send_SearchResultEntry(dn, entry)
+end
+```
+
+## Complete Example
+
+From `examples/rbslapd4.rb`:
+
+```ruby
+#!/usr/bin/env ruby
+require 'ldap/server'
+require 'ldap/server/router'
+
+$logger = Logger.new($stderr)
+
+class LDAPController
+  # Catch-all bind handler
+  def self.bind(request, version, dn, password, params)
+    $logger.debug "Catchall bind request for #{dn}"
+    raise LDAP::ResultError::UnwillingToPerform, "Invalid bind DN"
+  end
+
+  # Parameterized bind for specific users
+  def self.bindUser(request, version, dn, password, params)
+    uid = params[:uid]
+    
+    if uid == 'admin' && password == 'adminpassword'
+      $logger.info "Authenticated user #{uid}"
+      return  # Success
+    else
+      $logger.warn "Denied access for user #{uid}: Invalid credentials"
+      raise LDAP::ResultError::InvalidCredentials, "Invalid credentials"
+    end
+  end
+
+  # Catch-all search handler
+  def self.search(request, baseObject, scope, deref, filter, params)
+    $logger.info "Catchall search request for #{baseObject}"
+    raise LDAP::ResultError::UnwillingToPerform, "Invalid search DN"
+  end
+
+  # Specific search handler
+  def self.searchUsers(request, baseObject, scope, deref, filter, params)
+    $logger.info "Searching users"
+    
+    # Example: return a user entry
+    request.send_SearchResultEntry(
+      "uid=jdoe,ou=Users,dc=mydomain,dc=com",
+      {
+        'uid' => ['jdoe'],
+        'cn' => ['John Doe'],
+        'objectClass' => ['inetOrgPerson', 'person', 'top']
+      }
+    )
+  end
+end
+
+# Define routes
+router = LDAP::Server::Router.new($logger) do
+  # Bind routes (most specific first)
+  bind "uid=:uid,ou=Users,dc=mydomain,dc=com" => "LDAPController#bindUser"
+  bind nil => "LDAPController#bind"  # Catch-all
+
+  # Search routes
+  search "ou=Users,dc=mydomain,dc=com" => "LDAPController#searchUsers"
+  search nil => "LDAPController#search"  # Catch-all
+end
+
+# Create and start server
+server = LDAP::Server.new(
+  port: 1389,
+  nodelay: true,
+  listen: 10,
+  router: router
+)
+
+server.run_tcpserver
+server.join
+```
+
+Test the server:
+
+```bash
+# Successful bind
+ldapsearch -x -H ldap://127.0.0.1:1389/ \
+  -D "uid=admin,ou=Users,dc=mydomain,dc=com" \
+  -w adminpassword \
+  -b "ou=Users,dc=mydomain,dc=com"
+
+# Failed bind
+ldapsearch -x -H ldap://127.0.0.1:1389/ \
+  -D "uid=admin,ou=Users,dc=mydomain,dc=com" \
+  -w wrongpassword \
+  -b "ou=Users,dc=mydomain,dc=com"
+```
+
+## Error Handling
+
+Raise `LDAP::ResultError` exceptions to return LDAP error codes:
+
+```ruby
+def self.search(request, baseObject, scope, deref, filter, params)
+  # Return specific LDAP errors
+  raise LDAP::ResultError::NoSuchObject, "Entry not found"
+  raise LDAP::ResultError::InsufficientAccessRights, "Access denied"
+  raise LDAP::ResultError::UnwillingToPerform, "Operation not supported"
+  raise LDAP::ResultError::InvalidCredentials, "Bad password"
+end
+```
+
+Common result codes:
+
+- `NoSuchObject` - Entry doesn't exist
+- `InvalidCredentials` - Authentication failed
+- `InsufficientAccessRights` - Authorization failed
+- `UnwillingToPerform` - Operation not supported
+- `OperationsError` - Internal server error
+- `ProtocolError` - Invalid request
+
+## Advantages Over Legacy Operation Class
+
+<CardGroup cols={2}>
+<Card title="Better Organization" icon="folder-tree">
+Separate controllers for different parts of your directory tree
+</Card>
+
+<Card title="Parameterized Routes" icon="route">
+Extract values from DNs automatically
+</Card>
+
+<Card title="Clear Routing" icon="map">
+Explicit mapping of DNs to handlers
+</Card>
+
+<Card title="Less Boilerplate" icon="code">
+No need to subclass Operation and override methods
+</Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+<Card title="Legacy Operation" icon="clock-rotate-left" href="/guides/legacy-operation">
+Learn about the Operation class for legacy applications
+</Card>
+
+<Card title="Schema" icon="diagram-project" href="/guides/schema">
+Add schema validation to your router handlers
+</Card>
+</CardGroup>

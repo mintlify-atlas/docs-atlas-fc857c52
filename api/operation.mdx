@@ -1,0 +1,466 @@
+---
+title: "LDAP::Server::Operation"
+description: "Base class for handling individual LDAP operations"
+---
+
+## Overview
+
+The `LDAP::Server::Operation` class handles individual LDAP requests. This is the primary class you'll subclass to implement custom LDAP server behavior. Each instance handles one operation from a client.
+
+## Constants
+
+### Scope Values
+
+<ParamField path="LDAP::Server::BaseObject" type="Integer" default="0">
+  Search only the base object
+</ParamField>
+
+<ParamField path="LDAP::Server::SingleLevel" type="Integer" default="1">
+  Search immediate children of the base object
+</ParamField>
+
+<ParamField path="LDAP::Server::WholeSubtree" type="Integer" default="2">
+  Search the entire subtree
+</ParamField>
+
+### Dereference Aliases Values
+
+<ParamField path="LDAP::Server::NeverDerefAliases" type="Integer" default="0">
+  Never dereference aliases
+</ParamField>
+
+<ParamField path="LDAP::Server::DerefInSearching" type="Integer" default="1">
+  Dereference aliases during search but not when locating base
+</ParamField>
+
+<ParamField path="LDAP::Server::DerefFindingBaseObj" type="Integer" default="2">
+  Dereference aliases when locating base but not during search
+</ParamField>
+
+<ParamField path="LDAP::Server::DerefAlways" type="Integer" default="3">
+  Always dereference aliases
+</ParamField>
+
+## Constructor
+
+### `new(connection, messageID, *args)`
+
+Creates a new Operation instance. If you override this method, you **must** call `super`.
+
+<ParamField path="connection" type="LDAP::Server::Connection">
+  The connection object for this operation
+</ParamField>
+
+<ParamField path="messageID" type="Integer">
+  The LDAP message ID for this operation
+</ParamField>
+
+<ParamField path="args" type="Array">
+  Additional arguments passed from server configuration (`:operation_args`)
+</ParamField>
+
+```ruby
+class MyOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, data_store)
+    super(connection, messageID)
+    @data_store = data_store
+  end
+end
+```
+
+## Logging Methods
+
+### `log(msg, severity = Logger::INFO)`
+
+Logs a message.
+
+<ParamField path="msg" type="String">
+  Message to log
+</ParamField>
+
+<ParamField path="severity" type="Integer" default="Logger::INFO">
+  Log severity level
+</ParamField>
+
+### `debug(msg)`
+
+Logs a debug-level message.
+
+### `log_exception(msg)`
+
+Logs an exception with full backtrace.
+
+<ParamField path="msg" type="Exception">
+  Exception to log
+</ParamField>
+
+## Response Methods
+
+### `send_SearchResultEntry(dn, avs, opt = {})`
+
+Sends a search result entry to the client.
+
+<ParamField path="dn" type="String">
+  Distinguished name of the entry
+</ParamField>
+
+<ParamField path="avs" type="Hash">
+  Attribute-value hash: `{attr1 => val1, attr2 => [val2, val3]}`
+</ParamField>
+
+<ParamField path="opt" type="Hash" default="{}">
+  Optional parameters (e.g., controls)
+</ParamField>
+
+```ruby
+def search(basedn, scope, deref, filter)
+  send_SearchResultEntry("cn=admin,dc=example,dc=com", {
+    'cn' => ['admin'],
+    'objectClass' => ['person', 'organizationalPerson'],
+    'userPassword' => ['{SHA}...']
+  })
+end
+```
+
+The method automatically:
+- Enforces size limits
+- Filters attributes based on the search request
+- Handles `typesOnly` requests
+- Supports attribute range requests (e.g., `member;range=0-1499`)
+- Normalizes attribute names using schema if available
+- Filters operational attributes unless explicitly requested
+
+### `send_SearchResultReference(urls, opt = {})`
+
+Sends a search result reference (referral).
+
+<ParamField path="urls" type="Array<String>">
+  Array of LDAP URLs to refer the client to
+</ParamField>
+
+<ParamField path="opt" type="Hash" default="{}">
+  Optional parameters
+</ParamField>
+
+```ruby
+send_SearchResultReference([
+  'ldap://other.example.com/dc=example,dc=com'
+])
+```
+
+### `send_SearchResultDone(resultCode, opt = {})`
+
+Sends the final search result.
+
+<ParamField path="resultCode" type="Integer">
+  LDAP result code (0 for success)
+</ParamField>
+
+<ParamField path="opt" type="Hash" default="{}">
+  Optional parameters (`:errorMessage`, `:matchedDN`, etc.)
+</ParamField>
+
+### `send_ModifyResponse(resultCode, opt = {})`
+
+Sends a modify response.
+
+### `send_AddResponse(resultCode, opt = {})`
+
+Sends an add response.
+
+### `send_DelResponse(resultCode, opt = {})`
+
+Sends a delete response.
+
+### `send_ModifyDNResponse(resultCode, opt = {})`
+
+Sends a modify DN response.
+
+### `send_CompareResponse(resultCode, opt = {})`
+
+Sends a compare response.
+
+<ParamField path="resultCode" type="Integer">
+  Use `6` for compareTrue, `5` for compareFalse
+</ParamField>
+
+### `send_BindResponse(resultCode, opt = {})`
+
+Sends a bind response.
+
+<ParamField path="opt" type="Hash">
+  Can include `:serverSaslCreds` for SASL authentication
+</ParamField>
+
+### `send_ExtendedResponse(resultCode, opt = {})`
+
+Sends an extended operation response.
+
+<ParamField path="opt" type="Hash">
+  Can include `:responseName` (OID) and `:response` (value)
+</ParamField>
+
+## Limit Methods
+
+### `server_timelimit`
+
+Returns the server-imposed time limit in seconds. Override to implement custom logic (e.g., based on bind DN).
+
+```ruby
+def server_timelimit
+  @connection.binddn == "cn=admin,dc=example,dc=com" ? 300 : 10
+end
+```
+
+<ResponseField name="Returns" type="Integer or nil">
+  Time limit in seconds, or nil for default
+</ResponseField>
+
+### `server_sizelimit`
+
+Returns the server-imposed size limit. Override to implement custom logic.
+
+```ruby
+def server_sizelimit
+  @connection.binddn ? 1000 : 100
+end
+```
+
+<ResponseField name="Returns" type="Integer or nil">
+  Maximum number of entries to return, or nil for unlimited
+</ResponseField>
+
+## Override Methods
+
+These are the methods you typically override in your subclass:
+
+### `simple_bind(version, dn, password)`
+
+Handles simple bind authentication. Raise an exception if the bind is not acceptable.
+
+<ParamField path="version" type="Integer">
+  LDAP protocol version (usually 3)
+</ParamField>
+
+<ParamField path="dn" type="String or nil">
+  Distinguished name to bind as (nil for anonymous)
+</ParamField>
+
+<ParamField path="password" type="String">
+  Password credential
+</ParamField>
+
+```ruby
+def simple_bind(version, dn, password)
+  raise LDAP::ResultError::ProtocolError unless version == 3
+  return if dn.nil?  # Allow anonymous
+  
+  raise LDAP::ResultError::InvalidCredentials unless valid_user?(dn, password)
+end
+```
+
+<ResponseField name="Raises">
+  `LDAP::ResultError` subclass for authentication failures
+</ResponseField>
+
+### `search(basedn, scope, deref, filter)`
+
+Handles search requests. Call `send_SearchResultEntry` for each matching entry.
+
+<ParamField path="basedn" type="String">
+  Base DN for the search
+</ParamField>
+
+<ParamField path="scope" type="Integer">
+  Search scope (BaseObject, SingleLevel, or WholeSubtree)
+</ParamField>
+
+<ParamField path="deref" type="Integer">
+  Alias dereferencing behavior
+</ParamField>
+
+<ParamField path="filter" type="LDAP::Server::Filter">
+  Search filter object
+</ParamField>
+
+```ruby
+def search(basedn, scope, deref, filter)
+  entries = find_entries(basedn, scope, filter)
+  entries.each do |dn, attrs|
+    send_SearchResultEntry(dn, attrs)
+  end
+end
+```
+
+### `modify(dn, operations)`
+
+Handles modify requests.
+
+<ParamField path="dn" type="String">
+  DN of entry to modify
+</ParamField>
+
+<ParamField path="operations" type="Hash">
+  Hash of operations:
+  - `attr => [:add, val1, val2, ...]` - Add values
+  - `attr => [:replace, val1, val2, ...]` - Replace all values
+  - `attr => [:delete, val1, val2, ...]` - Delete specific values
+  - `attr => [:delete]` - Delete all values of attribute
+</ParamField>
+
+```ruby
+def modify(dn, operations)
+  entry = find_entry(dn)
+  raise LDAP::ResultError::NoSuchObject unless entry
+  
+  operations.each do |attr, op|
+    case op[0]
+    when :add
+      entry[attr] ||= []
+      entry[attr].concat(op[1..-1])
+    when :delete
+      if op.size == 1
+        entry.delete(attr)
+      else
+        entry[attr] -= op[1..-1]
+      end
+    when :replace
+      entry[attr] = op[1..-1]
+    end
+  end
+  
+  save_entry(dn, entry)
+end
+```
+
+### `add(dn, av)`
+
+Handles add requests.
+
+<ParamField path="dn" type="String">
+  DN of new entry
+</ParamField>
+
+<ParamField path="av" type="Hash">
+  Attribute-value hash: `{attr => [val1, val2, ...]}`
+</ParamField>
+
+```ruby
+def add(dn, av)
+  raise LDAP::ResultError::EntryAlreadyExists if entry_exists?(dn)
+  save_entry(dn, av)
+end
+```
+
+### `del(dn)`
+
+Handles delete requests.
+
+<ParamField path="dn" type="String">
+  DN of entry to delete
+</ParamField>
+
+```ruby
+def del(dn)
+  raise LDAP::ResultError::NoSuchObject unless entry_exists?(dn)
+  delete_entry(dn)
+end
+```
+
+### `modifydn(entry, newrdn, deleteoldrdn, newSuperior)`
+
+Handles modify DN (rename/move) requests.
+
+<ParamField path="entry" type="String">
+  Current DN of entry
+</ParamField>
+
+<ParamField path="newrdn" type="String">
+  New RDN
+</ParamField>
+
+<ParamField path="deleteoldrdn" type="Boolean">
+  Whether to delete old RDN attribute values
+</ParamField>
+
+<ParamField path="newSuperior" type="String or nil">
+  New parent DN (nil to keep same parent)
+</ParamField>
+
+```ruby
+def modifydn(entry, newrdn, deleteoldrdn, newSuperior)
+  # Parse current DN
+  old_parts = LDAP::Server::DN.parse(entry)
+  
+  # Build new DN
+  if newSuperior
+    new_dn = "#{newrdn},#{newSuperior}"
+  else
+    new_dn = "#{newrdn},#{old_parts[1..-1].join(',')}"
+  end
+  
+  # Move entry
+  move_entry(entry, new_dn, deleteoldrdn)
+end
+```
+
+### `compare(entry, attr, val)`
+
+Handles compare requests. Return true or false.
+
+<ParamField path="entry" type="String">
+  DN of entry
+</ParamField>
+
+<ParamField path="attr" type="String">
+  Attribute name
+</ParamField>
+
+<ParamField path="val" type="String">
+  Value to compare
+</ParamField>
+
+```ruby
+def compare(entry, attr, val)
+  e = find_entry(entry)
+  raise LDAP::ResultError::NoSuchObject unless e
+  
+  Array(e[attr]).include?(val)
+end
+```
+
+<ResponseField name="Returns" type="Boolean">
+  True if attribute has the value, false otherwise
+</ResponseField>
+
+## Complete Example
+
+```ruby
+class MyOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, data_store)
+    super(connection, messageID)
+    @data_store = data_store
+  end
+  
+  def simple_bind(version, dn, password)
+    raise LDAP::ResultError::ProtocolError, "Version 3 only" unless version == 3
+    return if dn.nil?  # Anonymous bind
+    
+    unless @data_store.valid_credentials?(dn, password)
+      raise LDAP::ResultError::InvalidCredentials
+    end
+  end
+  
+  def search(basedn, scope, deref, filter)
+    entries = @data_store.search(basedn, scope, filter)
+    entries.each do |dn, attrs|
+      send_SearchResultEntry(dn, attrs)
+    end
+  end
+  
+  def add(dn, av)
+    raise LDAP::ResultError::InsufficientAccessRights unless @connection.binddn
+    @data_store.add(dn, av)
+  end
+end
+```

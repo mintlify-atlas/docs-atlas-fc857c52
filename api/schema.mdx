@@ -1,0 +1,362 @@
+---
+title: "LDAP::Server::Schema"
+description: "Main schema class for managing LDAP objectclasses and attributetypes"
+---
+
+## Overview
+
+The `LDAP::Server::Schema` class represents an LDAP schema, providing a collection of objectclasses and attributetypes. It offers methods for loading schemas from strings or files, validating entries against the schema, and querying schema information.
+
+## Class Methods
+
+### new
+
+Creates a new empty schema instance.
+
+```ruby
+schema = LDAP::Server::Schema.new
+```
+
+**Returns:** A new `LDAP::Server::Schema` instance
+
+## Instance Methods
+
+### subschema_dn
+
+Returns the DN of the subschema subentry.
+
+```ruby
+dn = schema.subschema_dn
+# => "cn=Subschema"
+```
+
+**Returns:** String - The DN of the subschema subentry
+
+### subschema_subentry
+
+Returns an attribute-value hash representing the subschema subentry. This includes objectClasses, attributeTypes, ldapSyntaxes, and other schema information. The result is cached until `changed` is called.
+
+```ruby
+entry = schema.subschema_subentry
+# => {
+#   'objectClass' => ['top', 'subschema', 'extensibleObject'],
+#   'cn' => ['Subschema'],
+#   'objectClasses' => [...],
+#   'attributeTypes' => [...],
+#   'ldapSyntaxes' => [...]
+# }
+```
+
+**Returns:** Hash - Attribute-value hash representing the subschema subentry
+
+### changed
+
+Clears the cached subschema subentry. Call this after modifying the schema to ensure the subschema subentry is rebuilt on the next request.
+
+```ruby
+schema.add_attrtype(attr_definition)
+schema.changed
+```
+
+### add_attrtype
+
+Adds an AttributeType to the schema by parsing an RFC2252-compliant attribute type definition string.
+
+<ParamField path="str" type="string" required>
+  RFC2252-compliant AttributeType definition string
+</ParamField>
+
+```ruby
+schema.add_attrtype("( 2.5.4.41 NAME 'name' DESC 'RFC2256: common supertype of name attributes' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15{32768} )")
+```
+
+### find_attrtype
+
+Locates an AttributeType object by name, alias, or OID.
+
+<ParamField path="n" type="string | AttributeType" required>
+  Attribute name, alias, OID, or AttributeType instance
+</ParamField>
+
+```ruby
+attr = schema.find_attrtype('cn')
+attr = schema.find_attrtype('2.5.4.3')
+```
+
+**Returns:** `LDAP::Server::Schema::AttributeType` instance
+
+**Raises:** `LDAP::ResultError::UndefinedAttributeType` if the attribute is not found
+
+### all_attrtypes
+
+Returns an array of all AttributeType objects in the schema.
+
+```ruby
+attrs = schema.all_attrtypes
+```
+
+**Returns:** Array of `LDAP::Server::Schema::AttributeType` instances
+
+### add_objectclass
+
+Adds an ObjectClass to the schema by parsing an RFC2252-compliant objectclass definition string.
+
+<ParamField path="str" type="string" required>
+  RFC2252-compliant ObjectClass definition string
+</ParamField>
+
+```ruby
+schema.add_objectclass("( 2.5.6.0 NAME 'top' DESC 'top of the superclass chain' ABSTRACT MUST objectClass )")
+```
+
+### find_objectclass
+
+Locates an ObjectClass object by name, alias, or OID.
+
+<ParamField path="n" type="string | ObjectClass" required>
+  ObjectClass name, alias, OID, or ObjectClass instance
+</ParamField>
+
+```ruby
+oc = schema.find_objectclass('person')
+oc = schema.find_objectclass('2.5.6.6')
+```
+
+**Returns:** `LDAP::Server::Schema::ObjectClass` instance
+
+**Raises:** `LDAP::ResultError::ObjectClassViolation` if the objectclass is not found
+
+### all_objectclasses
+
+Returns an array of all ObjectClass objects in the schema.
+
+```ruby
+classes = schema.all_objectclasses
+```
+
+**Returns:** Array of `LDAP::Server::Schema::ObjectClass` instances
+
+### load_file
+
+Loads an OpenLDAP-format schema from a file.
+
+<ParamField path="filename" type="string" required>
+  Path to the schema file
+</ParamField>
+
+```ruby
+schema.load_file('/etc/ldap/schema/core.schema')
+```
+
+**Returns:** self
+
+### load
+
+Loads an OpenLDAP-format schema from a string or IO object. Lines starting with `attributetype` or `objectclass` define schema elements.
+
+<ParamField path="str_or_io" type="string | IO" required>
+  Schema definition string or IO object responding to `each_line`
+</ParamField>
+
+```ruby
+schema_text = <<~SCHEMA
+  attributetype ( 2.5.4.3 NAME 'cn' DESC 'common name' SUP name )
+  objectclass ( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST cn )
+SCHEMA
+
+schema.load(schema_text)
+```
+
+**Returns:** self
+
+<Note>
+  The parser is strict about element order according to RFC2252. For example, in an objectclass description, "SUP" must appear before "MAY". If elements are out of order, the parser will reject the definition.
+</Note>
+
+### load_system
+
+Loads the base set of objectclasses and attributetypes that OpenLDAP preloads internally. This includes fundamental classes like `top`, `subschema`, and `extensibleObject`, plus common attributes like `cn`, `objectClass`, and operational attributes.
+
+```ruby
+schema.load_system
+```
+
+**Returns:** self
+
+### resolve_oids
+
+Resolves OID strings to point to actual schema objects after loading objectclasses and attributetypes. This exposes schema inconsistencies such as objectclasses with unknown SUP classes or references to undefined attributetypes.
+
+```ruby
+schema.load_file('myschema.schema')
+schema.resolve_oids
+```
+
+<Note>
+  Call this method after loading all schema definitions to ensure all references are properly resolved.
+</Note>
+
+### validate
+
+Validates a new entry or update against the schema. For new entries, pass a hash of `attr => [val, val, ...]`. For updates, pass a hash of `attr => [:modtype, val, val, ...]` along with the existing entry.
+
+<ParamField path="mods" type="hash" required>
+  Hash of modifications: `{attr => values}` for new entries or `{attr => [:modtype, val, ...]}` for updates
+</ParamField>
+
+<ParamField path="entry" type="hash" default="{}">
+  Existing entry (for updates). Attribute names should be in standard form.
+</ParamField>
+
+<ParamField path="block" type="proc">
+  Optional block called to decide if the user is allowed to update an attribute. Receives the attribute object; return false to forbid the update.
+</ParamField>
+
+```ruby
+# Validate a new entry
+new_entry = {
+  'objectClass' => ['person'],
+  'cn' => ['John Doe'],
+  'sn' => ['Doe']
+}
+validated = schema.validate(new_entry)
+
+# Validate an update
+existing = { 'objectClass' => ['person'], 'cn' => ['John Doe'], 'sn' => ['Doe'] }
+mods = { 'mail' => [:add, 'john@example.com'] }
+validated = schema.validate(mods, existing)
+
+# With permission check
+validated = schema.validate(mods, existing) do |attr|
+  !attr.name.start_with?('system')
+end
+```
+
+**Returns:** Hash - The validated and updated entry
+
+**Raises:** 
+- `LDAP::ResultError::ConstraintViolation` - Cannot modify a NO-USER-MODIFICATION attribute
+- `LDAP::ResultError::ObjectClassViolation` - Various objectClass violations (missing, SINGLE-VALUE, etc.)
+- `LDAP::ResultError::InvalidAttributeSyntax` - Invalid attribute syntax or value
+
+### names
+
+Backwards-compatible API for ruby-ldap's `LDAP::Schema`. Returns an array of names for the specified schema element type.
+
+<ParamField path="key" type="string" required>
+  One of: 'objectClasses', 'attributeTypes', 'ldapSyntaxes', 'matchingRules'
+</ParamField>
+
+```ruby
+oc_names = schema.names('objectClasses')
+attr_names = schema.names('attributeTypes')
+```
+
+**Returns:** Array of strings, or nil if key is not recognized
+
+### attr
+
+Backwards-compatible API for ruby-ldap's `LDAP::Schema`. Returns specific attributes of an objectclass.
+
+<ParamField path="oc" type="string" required>
+  ObjectClass name or OID
+</ParamField>
+
+<ParamField path="at" type="string" required>
+  Attribute name: 'MUST', 'MAY', 'SUP', 'NAME', or 'DESC'
+</ParamField>
+
+```ruby
+must_attrs = schema.attr('person', 'MUST')
+may_attrs = schema.attr('person', 'MAY')
+```
+
+**Returns:** Array of strings, or nil if not found
+
+### must
+
+Backwards-compatible API for ruby-ldap's `LDAP::Schema`. Returns MUST attributes for an objectclass.
+
+<ParamField path="oc" type="string" required>
+  ObjectClass name or OID
+</ParamField>
+
+```ruby
+must_attrs = schema.must('person')
+```
+
+**Returns:** Array of attribute name strings
+
+### may
+
+Backwards-compatible API for ruby-ldap's `LDAP::Schema`. Returns MAY attributes for an objectclass.
+
+<ParamField path="oc" type="string" required>
+  ObjectClass name or OID
+</ParamField>
+
+```ruby
+may_attrs = schema.may('person')
+```
+
+**Returns:** Array of attribute name strings
+
+### sup
+
+Backwards-compatible API for ruby-ldap's `LDAP::Schema`. Returns superior objectclasses.
+
+<ParamField path="oc" type="string" required>
+  ObjectClass name or OID
+</ParamField>
+
+```ruby
+sup_classes = schema.sup('person')
+```
+
+**Returns:** Array of objectclass name strings
+
+## Constants
+
+### SUBSCHEMA_ENTRY_ATTR
+
+The attribute name for the subschema entry: `'cn'`
+
+### SUBSCHEMA_ENTRY_VALUE
+
+The value for the subschema entry attribute: `'Subschema'`
+
+## Example Usage
+
+```ruby
+require 'ldap/server/schema'
+
+# Create and initialize a schema
+schema = LDAP::Server::Schema.new
+schema.load_system
+schema.load_file('/etc/ldap/schema/inetorgperson.schema')
+schema.resolve_oids
+
+# Query schema information
+person_oc = schema.find_objectclass('person')
+puts "Person MUST attributes: #{schema.must('person').join(', ')}"
+
+# Validate an entry
+entry = {
+  'objectClass' => ['inetOrgPerson'],
+  'cn' => ['Jane Smith'],
+  'sn' => ['Smith'],
+  'mail' => ['jane@example.com']
+}
+
+begin
+  validated_entry = schema.validate(entry)
+  puts "Entry is valid!"
+rescue LDAP::ResultError => e
+  puts "Validation failed: #{e.message}"
+end
+```
+
+## See Also
+
+- [LDAP::Server::Schema::AttributeType](/api/attribute-types) - AttributeType class details
+- [LDAP::Server::Schema::ObjectClass](/api/object-classes) - ObjectClass class details

@@ -1,0 +1,798 @@
+---
+title: Performance
+description: Performance tuning, benchmarking, optimization tips, and production best practices
+---
+
+## Overview
+
+ruby-ldapserver is designed to be a lightweight, efficient LDAP protocol layer. This guide covers benchmarking, optimization strategies, and production deployment considerations.
+
+<Note>
+ruby-ldapserver's performance is primarily limited by:
+- Ruby's Global Interpreter Lock (GVL) in threading mode
+- Your backend data source speed
+- Network I/O
+</Note>
+
+## Benchmarking
+
+### Using speedtest.rb
+
+The `examples/speedtest.rb` script provides basic performance testing:
+
+```ruby
+#!/usr/bin/env ruby
+require 'ldap'
+
+CHILDREN = 10      # Number of concurrent clients
+CONNECTS = 1       # Connections per client
+SEARCHES = 100     # Searches per connection
+
+pids = []
+CHILDREN.times do
+  pids << fork do
+    CONNECTS.times do
+      conn = LDAP::Conn.new("localhost", 1389)
+      conn.set_option(LDAP::LDAP_OPT_PROTOCOL_VERSION, 3)
+      conn.bind
+      
+      SEARCHES.times do
+        conn.search("cn=Fred Flintstone,dc=example,dc=com",
+                    LDAP::LDAP_SCOPE_BASE,
+                    "(objectclass=*)") do |e|
+          # Process results
+        end
+      end
+      
+      conn.unbind
+    end
+  end
+end
+
+# Wait for all children
+pids.each { |p| Process.wait(p) }
+```
+
+Run it:
+
+```bash
+# Start your LDAP server on port 1389
+ruby examples/rbslapd1.rb &
+
+# Run benchmark
+time ruby examples/speedtest.rb
+```
+
+### Benchmark Results
+
+From the README, single-processor AMD Athlon 2500+:
+
+| Scenario | Searches/Second |
+|----------|----------------|
+| N=1, M=1000 (sequential) | ~800 |
+| N=10, M=100 (concurrent) | ~300-400 |
+
+<Note>
+These benchmarks used `examples/rbslapd1.rb` (in-memory hash) on the same machine as the client. Your results will vary based on hardware, backend, and network.
+</Note>
+
+### Custom Benchmarking
+
+Create a benchmark script tailored to your use case:
+
+```ruby
+#!/usr/bin/env ruby
+require 'ldap'
+require 'benchmark'
+
+def run_searches(host, port, count)
+  conn = LDAP::Conn.new(host, port)
+  conn.set_option(LDAP::LDAP_OPT_PROTOCOL_VERSION, 3)
+  conn.bind
+  
+  count.times do
+    conn.search("dc=example,dc=com",
+                LDAP::LDAP_SCOPE_SUBTREE,
+                "(uid=*)") do |e|
+      # Process results
+    end
+  end
+  
+  conn.unbind
+end
+
+num_searches = 1000
+
+time = Benchmark.realtime do
+  run_searches("localhost", 1389, num_searches)
+end
+
+puts "#{num_searches} searches in #{time.round(2)}s"
+puts "#{(num_searches / time).round(2)} searches/second"
+```
+
+## Network Optimization
+
+### TCP_NODELAY
+
+Disable Nagle's algorithm to reduce latency:
+
+```ruby
+server = LDAP::Server.new(
+  port: 1389,
+  nodelay: true  # Recommended for LDAP
+)
+```
+
+<Note>
+**TCP_NODELAY**: By default, the OS buffers response data for ~100ms before sending. Since LDAP responses are typically sent in a single write(), this buffering adds unnecessary latency. Enable `nodelay: true` to disable this.
+</Note>
+
+### Listen Queue Depth
+
+Increase the listen backlog for high-concurrency scenarios:
+
+```ruby
+server = LDAP::Server.new(
+  port: 1389,
+  listen: 128  # Default is 5, increase for more concurrent connections
+)
+```
+
+The `listen` parameter controls how many pending connections the OS will queue while your server is busy.
+
+## Threading vs Prefork Performance
+
+### Threading Mode
+
+**Best for:**
+- Single-core or few-core systems
+- Low-latency responses
+- Shared in-memory state
+
+**Configuration:**
+```ruby
+server = LDAP::Server.new(
+  port: 1389,
+  nodelay: true,
+  listen: 10,
+  operation_class: MyOperation,
+  operation_args: [shared_data]
+)
+
+server.run_tcpserver
+```
+
+**Limitations:**
+- Single CPU core (Ruby GVL)
+- May hit file descriptor limits with many concurrent connections
+- C extension blocking can freeze all operations
+
+### Prefork Mode
+
+**Best for:**
+- Multi-core systems
+- High concurrency
+- CPU-intensive operations
+- C extensions that block
+
+**Configuration:**
+```ruby
+server = LDAP::Server.new(
+  port: 1389,
+  nodelay: true,
+  listen: 10,
+  
+  # Prefork parameters
+  min_servers: 5,
+  max_servers: 20,
+  max_request_per_child: 10000,
+  max_idle: 60,
+  
+  operation_class: MyOperation,
+  operation_args: [shared_data]
+)
+
+server.run_prefork
+```
+
+**Tuning:**
+```ruby
+require 'etc'
+
+# Set workers based on CPU count
+num_cpus = Etc.nprocessors
+
+server = LDAP::Server.new(
+  min_servers: num_cpus,
+  max_servers: num_cpus * 2,
+  max_request_per_child: 10000,  # Restart workers periodically
+  max_idle: 60,                  # Kill idle workers after 60s
+  # ...
+)
+```
+
+See the [Threading guide](/guides/threading) for detailed comparison.
+
+## Backend Optimization
+
+### Connection Pooling
+
+For SQL backends, use connection pooling:
+
+```ruby
+class SQLPool
+  def initialize(size, *args)
+    @args = args
+    @pool = Queue.new  # Thread-safe queue
+    size.times { @pool.push nil }  # Lazy initialization
+  end
+  
+  def borrow
+    conn = @pool.pop
+    conn ||= Mysql.new(*@args)
+    yield conn
+  rescue Exception
+    conn = nil  # Don't return broken connection to pool
+    raise
+  ensure
+    @pool.push conn
+  end
+end
+
+# Usage:
+pool = SQLPool.new(10, "db.example.com", "user", "pass", "db")
+
+class SQLOperation < LDAP::Server::Operation
+  @@pool = nil
+  
+  def self.set_pool(pool)
+    @@pool = pool
+  end
+  
+  def search(basedn, scope, deref, filter)
+    @@pool.borrow do |conn|
+      results = conn.query("SELECT ...")
+      results.each do |row|
+        send_SearchResultEntry(dn, attributes)
+      end
+    end
+  end
+end
+
+SQLOperation.set_pool(pool)
+```
+
+From `examples/rbslapd2.rb`:
+
+```ruby
+SQL_POOL_SIZE = 5
+
+pool = SQLPool.new(SQL_POOL_SIZE, "db.host", "user", "pass", "database")
+SQLOperation.setcache(cache, pool)
+```
+
+### Caching
+
+Cache frequently accessed data:
+
+```ruby
+class LRUCache
+  def initialize(size)
+    @size = size
+    @cache = []   # [[key, val], [key, val], ...]
+    @mutex = Mutex.new
+  end
+  
+  def add(key, value)
+    @mutex.synchronize do
+      @cache.delete_if { |k, v| k == key }
+      @cache.unshift [key, value]
+      @cache.pop while @cache.size > @size
+    end
+  end
+  
+  def find(key)
+    @mutex.synchronize do
+      entry = @cache.find { |k, v| k == key }
+      return nil unless entry
+      
+      # Move to front (LRU)
+      @cache.delete(entry)
+      @cache.unshift(entry)
+      entry[1]
+    end
+  end
+end
+
+# Usage:
+cache = LRUCache.new(1000)
+
+class CachedOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, cache, backend)
+    super(connection, messageID)
+    @cache = cache
+    @backend = backend
+  end
+  
+  def search(basedn, scope, deref, filter)
+    # Try cache first
+    cached = @cache.find(cache_key(basedn, filter))
+    if cached
+      cached.each { |dn, av| send_SearchResultEntry(dn, av) }
+      return
+    end
+    
+    # Query backend
+    results = @backend.search(basedn, scope, filter)
+    @cache.add(cache_key(basedn, filter), results)
+    
+    results.each { |dn, av| send_SearchResultEntry(dn, av) }
+  end
+end
+```
+
+From `examples/rbslapd2.rb`:
+
+```ruby
+PW_CACHE_SIZE = 100
+cache = LRUCache.new(PW_CACHE_SIZE)
+```
+
+### Database Indexes
+
+For SQL backends, ensure proper indexing:
+
+```sql
+-- Index commonly searched attributes
+CREATE INDEX idx_uid ON users(uid);
+CREATE INDEX idx_mail ON users(mail);
+CREATE INDEX idx_cn ON users(cn);
+
+-- Index for DN lookups
+CREATE UNIQUE INDEX idx_dn ON entries(dn);
+```
+
+## Pure Ruby Libraries
+
+Use pure Ruby libraries to avoid thread blocking:
+
+### MySQL
+
+```ruby
+# BAD: mysql-ruby (C wrapper, blocks threads)
+require 'mysql'
+conn = Mysql.connect(...)
+
+# GOOD: ruby-mysql (pure Ruby)
+require 'ruby-mysql'
+conn = Mysql.new(...)
+```
+
+### DNS Resolution
+
+```ruby
+# Use pure Ruby DNS resolver
+require 'resolv-replace'
+
+# Now TCPSocket uses Ruby DNS instead of C resolver
+conn = TCPSocket.new('example.com', 3306)
+```
+
+From the README:
+
+> When talking to a MySQL database, you might want to choose `ruby-mysql` (pure Ruby implementation) rather than `mysql-ruby` (C wrapper that blocks while waiting for responses from the server)
+
+## Schema Optimization
+
+### Lazy Schema Loading
+
+For large schemas, consider lazy loading:
+
+```ruby
+schema = LDAP::Server::Schema.new
+schema.load_system
+
+# Only load schema files you actually need
+if needs_inetorgperson?
+  schema.load_file("inetorgperson.schema")
+end
+
+schema.resolve_oids
+```
+
+### Disable Schema Validation
+
+If you don't need validation, don't configure a schema:
+
+```ruby
+# Without schema - no validation overhead
+server = LDAP::Server.new(
+  port: 1389,
+  operation_class: MyOperation
+  # No :schema option
+)
+```
+
+## Memory Management
+
+### Prefork Worker Recycling
+
+Recycle workers to prevent memory leaks:
+
+```ruby
+server = LDAP::Server.new(
+  max_request_per_child: 10000,  # Restart after 10k requests
+  # ...
+)
+```
+
+### Limit Result Set Sizes
+
+Enforce size limits:
+
+```ruby
+class MyOperation < LDAP::Server::Operation
+  def server_sizelimit
+    1000  # Max 1000 results per search
+  end
+  
+  def server_timelimit
+    30  # Max 30 seconds per search
+  end
+end
+```
+
+Or configure per-user:
+
+```ruby
+def server_sizelimit
+  case @connection.binddn
+  when nil
+    100  # Anonymous: 100 results
+  when /cn=admin/
+    nil  # Admin: unlimited
+  else
+    1000  # Regular users: 1000 results
+  end
+end
+```
+
+### Attribute Range Limiting
+
+Limit multi-valued attribute sizes:
+
+```ruby
+server = LDAP::Server.new(
+  attribute_range_limit: 1500,  # Microsoft AD standard
+  # ...
+)
+```
+
+Clients can request ranges:
+```
+member;range=0-1499
+member;range=1500-2999
+```
+
+## Monitoring and Logging
+
+### Performance Logging
+
+```ruby
+class MyOperation < LDAP::Server::Operation
+  def search(basedn, scope, deref, filter)
+    start_time = Time.now
+    result_count = 0
+    
+    begin
+      # Perform search
+      results.each do |dn, av|
+        send_SearchResultEntry(dn, av)
+        result_count += 1
+      end
+    ensure
+      elapsed = Time.now - start_time
+      log "Search completed: #{result_count} results in #{elapsed.round(3)}s", Logger::INFO
+      
+      # Warn on slow queries
+      if elapsed > 5.0
+        log "SLOW QUERY: #{basedn} #{filter.inspect}", Logger::WARN
+      end
+    end
+  end
+end
+```
+
+### Request Statistics
+
+```ruby
+class Stats
+  def initialize
+    @mutex = Mutex.new
+    @searches = 0
+    @binds = 0
+    @adds = 0
+    @total_time = 0.0
+  end
+  
+  def record_search(elapsed)
+    @mutex.synchronize do
+      @searches += 1
+      @total_time += elapsed
+    end
+  end
+  
+  def report
+    @mutex.synchronize do
+      avg = @searches > 0 ? @total_time / @searches : 0
+      "Searches: #{@searches}, Avg time: #{avg.round(3)}s"
+    end
+  end
+end
+
+$stats = Stats.new
+
+# Report stats periodically
+Thread.new do
+  loop do
+    sleep 60
+    puts $stats.report
+  end
+end
+```
+
+## Production Deployment
+
+### Systemd Service
+
+Create `/etc/systemd/system/ldap-server.service`:
+
+```ini
+[Unit]
+Description=Ruby LDAP Server
+After=network.target
+
+[Service]
+Type=simple
+User=ldap
+Group=ldap
+WorkingDirectory=/opt/ldap-server
+ExecStart=/usr/bin/ruby /opt/ldap-server/server.rb
+Restart=always
+RestartSec=10
+
+# Security
+PrivateTmp=true
+NoNewPrivileges=true
+
+# Limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+
+```bash
+sudo systemctl enable ldap-server
+sudo systemctl start ldap-server
+sudo systemctl status ldap-server
+```
+
+### Using a Reverse Proxy
+
+For additional features, use a load balancer:
+
+```yaml
+# HAProxy configuration
+frontend ldap_frontend
+    bind *:389
+    mode tcp
+    default_backend ldap_backend
+
+backend ldap_backend
+    mode tcp
+    balance roundrobin
+    server ldap1 127.0.0.1:1389 check
+    server ldap2 127.0.0.1:1390 check
+```
+
+### Docker Deployment
+
+```dockerfile
+FROM ruby:3.2
+
+WORKDIR /app
+
+COPY Gemfile Gemfile.lock ./
+RUN bundle install
+
+COPY . .
+
+EXPOSE 389 636
+
+CMD ["ruby", "server.rb"]
+```
+
+```yaml
+# docker-compose.yml
+version: '3'
+services:
+  ldap:
+    build: .
+    ports:
+      - "389:389"
+      - "636:636"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - LDAP_PORT=389
+      - LDAPS_PORT=636
+    restart: unless-stopped
+```
+
+### Resource Limits
+
+```ruby
+# Set max open files
+require 'etc'
+
+Process.setrlimit(Process::RLIMIT_NOFILE, 65536, 65536)
+
+server = LDAP::Server.new(
+  port: 389,
+  max_servers: 20,  # Don't exceed available memory
+  # ...
+)
+```
+
+## Profiling
+
+### Ruby Profiler
+
+```ruby
+require 'ruby-prof'
+
+result = RubyProf.profile do
+  # Run operations to profile
+  100.times do
+    operation.search(...)
+  end
+end
+
+printer = RubyProf::FlatPrinter.new(result)
+printer.print(STDOUT)
+```
+
+### Memory Profiling
+
+```ruby
+require 'objspace'
+
+ObjectSpace.trace_object_allocations_start
+
+# Run operations
+
+ObjectSpace.trace_object_allocations_stop
+
+# Find memory leaks
+GC.start
+puts ObjectSpace.count_objects
+```
+
+## Performance Checklist
+
+<Steps>
+
+<Step title="Enable TCP_NODELAY">
+```ruby
+server = LDAP::Server.new(nodelay: true)
+```
+</Step>
+
+<Step title="Increase listen backlog">
+```ruby
+server = LDAP::Server.new(listen: 128)
+```
+</Step>
+
+<Step title="Use prefork on multi-core systems">
+```ruby
+server.run_prefork
+```
+</Step>
+
+<Step title="Pool backend connections">
+Implement connection pooling for SQL, Redis, etc.
+</Step>
+
+<Step title="Cache frequently accessed data">
+Use LRU cache or external cache (Redis, Memcached)
+</Step>
+
+<Step title="Use pure Ruby libraries">
+```ruby
+require 'resolv-replace'
+require 'ruby-mysql'
+```
+</Step>
+
+<Step title="Set appropriate limits">
+```ruby
+def server_sizelimit
+  1000
+end
+
+def server_timelimit
+  30
+end
+```
+</Step>
+
+<Step title="Monitor and profile">
+Log slow queries and profile hot paths
+</Step>
+
+</Steps>
+
+## Benchmark Your Server
+
+Create a realistic benchmark:
+
+1. **Identify common queries** - What do clients search for most?
+2. **Generate test data** - Populate with representative data
+3. **Simulate load** - Use multiple concurrent clients
+4. **Measure** - Track requests/second and latency
+5. **Profile** - Find bottlenecks
+6. **Optimize** - Tune one thing at a time
+7. **Repeat** - Re-benchmark after changes
+
+```ruby
+# Simple benchmark script
+require 'ldap'
+require 'benchmark'
+
+def benchmark_server(host, port, queries)
+  total = queries.size
+  start = Time.now
+  
+  conn = LDAP::Conn.new(host, port)
+  conn.set_option(LDAP::LDAP_OPT_PROTOCOL_VERSION, 3)
+  conn.bind
+  
+  queries.each do |query|
+    conn.search(query[:base], query[:scope], query[:filter]) do |e|
+      # Process results
+    end
+  end
+  
+  conn.unbind
+  
+  elapsed = Time.now - start
+  puts "#{total} queries in #{elapsed.round(2)}s"
+  puts "#{(total / elapsed).round(2)} queries/second"
+end
+
+# Define your common queries
+queries = [
+  { base: "dc=example,dc=com", scope: LDAP::LDAP_SCOPE_SUBTREE, filter: "(uid=john)" },
+  { base: "dc=example,dc=com", scope: LDAP::LDAP_SCOPE_SUBTREE, filter: "(mail=*@example.com)" },
+  # ... more queries ...
+] * 100  # Run each 100 times
+
+benchmark_server("localhost", 1389, queries)
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+<Card title="Threading" icon="arrows-spin" href="/guides/threading">
+Understand threading vs prefork trade-offs
+</Card>
+
+<Card title="Building Server" icon="server" href="/guides/building-server">
+Review server configuration options
+</Card>
+</CardGroup>

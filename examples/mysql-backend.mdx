@@ -1,0 +1,390 @@
+---
+title: 'MySQL Backend Integration'
+description: 'Build an LDAP gateway to MySQL with connection pooling and LRU caching'
+---
+
+This example demonstrates how to build an LDAP-to-SQL gateway, providing an LDAP interface to data stored in a MySQL database. It includes connection pooling, LRU caching for performance, and multi-threaded request handling.
+
+## Overview
+
+The `rbslapd2.rb` example creates an LDAP server that:
+- Maps LDAP searches to SQL queries
+- Validates passwords via LDAP binds against MySQL data
+- Maintains a thread-safe pool of persistent MySQL connections
+- Caches recent lookups using an LRU (Least Recently Used) cache
+- Handles concurrent requests safely across multiple threads
+
+## Use Case
+
+This example shows a common integration pattern: exposing a database table through LDAP protocol. The example uses a login table:
+
+```
++----------+----------+--------+
+| login_id | login    | passwd |
++----------+----------+--------+
+|    1     | brian    | foobar |
+|    2     | caroline | boing  |
++----------+----------+--------+
+```
+
+LDAP clients can:
+- Search for users: `(uid=brian)`
+- Authenticate via LDAP bind using the password from the database
+- Receive synthesized LDAP entries with DN and attributes
+
+## Configuration
+
+```ruby
+SQL_CONNECT = ["1.2.3.4", "myuser", "mypass", "mydb"]
+TABLE = "logins"
+SQL_POOL_SIZE = 5
+PW_CACHE_SIZE = 100
+BASEDN = "dc=example,dc=com"
+LDAP_PORT = 1389
+```
+
+<Note>
+Update these constants to match your MySQL server configuration and desired LDAP base DN.
+</Note>
+
+## Implementation
+
+<Steps>
+
+<Step title="Create a Connection Pool">
+
+Implement a thread-safe pool of persistent MySQL connections:
+
+```ruby
+class SQLPool
+  def initialize(n, *args)
+    @args = args
+    @pool = Queue.new        # this is a thread-safe queue
+    n.times { @pool.push nil }    # create connections on demand
+  end
+
+  def borrow
+    conn = @pool.pop || Mysql::new(*@args)
+    yield conn
+  rescue Exception
+    conn = nil            # put 'nil' back into the pool
+    raise
+  ensure
+    @pool.push conn
+  end
+end
+```
+
+**Key features:**
+- Uses Ruby's `Queue` class for thread-safe borrowing/returning
+- Creates connections lazily (on first use)
+- Automatically returns connections to the pool, even on exceptions
+- Discards failed connections by putting `nil` back in the pool
+
+<Warning>
+The pool will create a new connection if a borrowed connection fails. This prevents a single bad connection from breaking the pool.
+</Warning>
+
+</Step>
+
+<Step title="Implement an LRU Cache">
+
+Create a simple LRU cache for username-to-password mappings:
+
+```ruby
+class LRUCache
+  def initialize(size)
+    @size = size
+    @cache = []   # [[key,val],[key,val],...]
+    @mutex = Mutex.new
+  end
+
+  def add(id,data)
+    @mutex.synchronize do
+      @cache.delete_if { |k,v| k == id }
+      @cache.unshift [id,data]
+      @cache.pop while @cache.size > @size
+    end
+  end
+
+  def find(id)
+    @mutex.synchronize do
+      index = entry = nil
+      @cache.each_with_index do |e, i|
+        if e[0] == id
+          entry = e
+          index = i
+          break
+        end
+      end
+      return nil unless index
+      @cache.delete_at(index)
+      @cache.unshift entry
+      return entry[1]
+    end
+  end
+end
+```
+
+**How it works:**
+- Stores key-value pairs in an array
+- Most recently used items are at the front
+- `add` removes duplicates and adds to front, evicting old items if needed
+- `find` moves accessed items to the front (LRU behavior)
+- Thread-safe using a mutex
+
+<Note>
+The cache uses linear search, so keep `PW_CACHE_SIZE` reasonable (100 is a good default).
+</Note>
+
+</Step>
+
+<Step title="Define the Operation Class">
+
+Create the custom operation class and set up shared state:
+
+```ruby
+class SQLOperation < LDAP::Server::Operation
+  def self.setcache(cache,pool)
+    @@cache = cache
+    @@pool = pool
+  end
+  
+  # ... operation methods ...
+end
+```
+
+The cache and connection pool are stored as class variables, shared across all operation instances (and therefore all client connections).
+
+</Step>
+
+<Step title="Implement Search Operations">
+
+Map LDAP searches to SQL queries:
+
+```ruby
+def search(basedn, scope, deref, filter)
+  raise LDAP::ResultError::UnwillingToPerform, "Bad base DN" unless basedn == BASEDN
+  raise LDAP::ResultError::UnwillingToPerform, "Bad filter" unless filter[0..1] == [:eq, "uid"]
+  uid = filter[3]
+  @@pool.borrow do |sql|
+    q = "select login_id,passwd from #{TABLE} where login='#{sql.quote(uid)}'"
+    puts "SQL Query #{sql.object_id}: #{q}" if $debug
+    res = sql.query(q)
+    res.each do |login_id,passwd|
+      @@cache.add(login_id, passwd)
+      send_SearchResultEntry("id=#{login_id},#{BASEDN}", {
+        "maildir"=>["\netapp\#{uid}\],
+      })
+    end
+  end
+end
+```
+
+**Key points:**
+- Only supports the exact base DN configured
+- Only handles filters of the form `(uid=value)`
+- Uses `sql.quote()` to prevent SQL injection
+- Synthesizes LDAP entries with DN format: `id=<login_id>,dc=example,dc=com`
+- Caches passwords for subsequent bind operations
+- Returns a `maildir` attribute (example of adding computed attributes)
+
+<Warning>
+This example only supports `(uid=...)` filters. Other filter types will result in an "UnwillingToPerform" error.
+</Warning>
+
+</Step>
+
+<Step title="Implement Bind Operations">
+
+Validate passwords using the cache or database:
+
+```ruby
+def simple_bind(version, dn, password)
+  return if dn.nil?   # accept anonymous
+
+  raise LDAP::ResultError::UnwillingToPerform unless dn =~ /\Aid=(\d+),#{BASEDN}\z/
+  login_id = $1
+  dbpw = @@cache.find(login_id)
+  unless dbpw
+    @@pool.borrow do |sql|
+      q = "select passwd from #{TABLE} where login_id=#{login_id}"
+      puts "SQL Query #{sql.object_id}: #{q}" if $debug
+      res = sql.query(q)
+      if res.num_rows == 1
+        dbpw = res.fetch_row[0]
+        @@cache.add(login_id, dbpw)
+      end
+    end
+  end
+  raise LDAP::ResultError::InvalidCredentials unless dbpw and dbpw != "" and dbpw == password
+end
+```
+
+**Flow:**
+1. Allow anonymous binds (no DN provided)
+2. Parse the login ID from the DN
+3. Check the LRU cache first
+4. If not cached, query the database
+5. Add the password to the cache for next time
+6. Compare the password and raise `InvalidCredentials` on mismatch
+
+<Note>
+The cache allows a bind to succeed without a database query if the user was recently searched. This is a common pattern: search for a user, then bind to verify their password.
+</Note>
+
+</Step>
+
+<Step title="Initialize and Start the Server">
+
+Create the shared objects and start the server:
+
+```ruby
+cache = LRUCache.new(PW_CACHE_SIZE)
+pool = SQLPool.new(SQL_POOL_SIZE, *SQL_CONNECT)
+SQLOperation.setcache(cache,pool)
+
+s = LDAP::Server.new(
+  :port            => LDAP_PORT,
+  :nodelay         => true,
+  :listen          => 10,
+  :operation_class => SQLOperation
+)
+s.run_tcpserver
+s.join
+```
+
+</Step>
+
+</Steps>
+
+## Usage
+
+### Searching for Users
+
+```bash
+ldapsearch -x -H ldap://127.0.0.1:1389/ -b "dc=example,dc=com" "(uid=brian)"
+```
+
+**Expected output:**
+```ldif
+dn: id=1,dc=example,dc=com
+maildir: /netapp/brian/
+```
+
+### Authenticated Bind
+
+Search with authentication:
+
+```bash
+ldapsearch -x -H ldap://127.0.0.1:1389/ -b "dc=example,dc=com" \
+  -D "id=1,dc=example,dc=com" -W "(uid=brian)"
+```
+
+You'll be prompted for the password. Enter the password from the database (e.g., "foobar").
+
+## Architecture Benefits
+
+### Thread Safety
+
+<Note>
+The server handles multiple concurrent client connections using Ruby threads. The connection pool and LRU cache are both thread-safe.
+</Note>
+
+The example includes `require 'resolv-replace'` which replaces Ruby's DNS resolution with a thread-friendly version, preventing blocking.
+
+### Connection Pooling
+
+Advantages:
+- Reuses database connections across requests
+- Limits maximum concurrent database connections
+- Handles connection failures gracefully
+- Better performance than creating a connection per request
+
+### LRU Caching
+
+Advantages:
+- Reduces database load for repeated queries
+- Allows binds to succeed without additional queries
+- Thread-safe sharing across all client connections
+- Automatic eviction of old entries
+
+## Extending the Example
+
+### Support More Filter Types
+
+Expand the search method to handle additional filters:
+
+```ruby
+case filter[0]
+when :eq
+  attr = filter[1]
+  value = filter[3]
+  # Map to different SQL columns
+when :present
+  # Handle (attribute=*)
+when :and, :or
+  # Handle complex filters
+end
+```
+
+### Add More Attributes
+
+Synthesize additional LDAP attributes from database columns:
+
+```ruby
+send_SearchResultEntry("id=#{login_id},#{BASEDN}", {
+  "uid" => [uid],
+  "mail" => ["#{uid}@example.com"],
+  "maildir" => ["/netapp/#{uid}/"],
+  "objectClass" => ["inetOrgPerson"]
+})
+```
+
+### Password Hashing
+
+For production use, hash passwords in the database:
+
+```ruby
+require 'bcrypt'
+
+dbpw_hash = BCrypt::Password.new(dbpw)
+raise LDAP::ResultError::InvalidCredentials unless dbpw_hash == password
+```
+
+## Performance Considerations
+
+<Warning>
+**For production use, consider:**
+
+- Using prepared statements to prevent SQL injection
+- Implementing connection health checks
+- Adding metrics and monitoring
+- Handling database failover
+- Tuning cache size based on your workload
+- Testing connection pool size under load
+</Warning>
+
+## Testing
+
+Set up a test MySQL database:
+
+```sql
+CREATE TABLE logins (
+  login_id INT AUTO_INCREMENT PRIMARY KEY,
+  login VARCHAR(255) NOT NULL,
+  passwd VARCHAR(255) NOT NULL
+);
+
+INSERT INTO logins (login, passwd) VALUES 
+  ('brian', 'foobar'),
+  ('caroline', 'boing');
+```
+
+Then update the configuration constants and run the server.
+
+## Next Steps
+
+- [Preforking Server](/examples/prefork-server) - Scale to multiple processes
+- [Schema Validation](/guides/schema) - Add LDAP schema support
+- [Authentication](/guides/building-server) - Implement more authentication methods

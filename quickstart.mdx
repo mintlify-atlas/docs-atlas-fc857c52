@@ -1,80 +1,373 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Build your first LDAP server with ruby-ldapserver in under 5 minutes
 ---
 
-## Get started in three steps
+## Overview
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This quickstart guide will walk you through creating a minimal but functional LDAP server that can handle bind and search operations. By the end, you'll have a working server that responds to LDAP client queries.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  This tutorial assumes you've already installed ruby-ldapserver. If not, see the [Installation](/installation) guide first.
 </Note>
+
+## What We'll Build
+
+We'll create a simple LDAP server that:
+- Accepts anonymous bind requests
+- Stores directory entries in a Ruby hash
+- Responds to search queries with filter evaluation
+- Runs on port 1389 (non-privileged)
+
+<Steps>
+  <Step title="Create the Server File">
+    Create a new file called `my_ldap_server.rb`:
+
+    ```ruby my_ldap_server.rb
+    #!/usr/bin/env ruby
+    
+    require 'ldap/server'
+    
+    # Directory data - a simple hash of DN => attributes
+    directory = {
+      'dc=example,dc=com' => {
+        'objectClass' => ['top', 'dcObject', 'organization'],
+        'dc' => ['example'],
+        'o' => ['Example Organization']
+      },
+      'ou=users,dc=example,dc=com' => {
+        'objectClass' => ['top', 'organizationalUnit'],
+        'ou' => ['users']
+      },
+      'uid=john,ou=users,dc=example,dc=com' => {
+        'objectClass' => ['top', 'person', 'inetOrgPerson'],
+        'uid' => ['john'],
+        'cn' => ['John Doe'],
+        'sn' => ['Doe'],
+        'mail' => ['john@example.com']
+      }
+    }
+    
+    puts "Directory loaded with #{directory.size} entries"
+    ```
+
+    This sets up our basic directory structure with a root, organizational unit, and one user.
+  </Step>
+
+  <Step title="Create the Operation Handler">
+    Add the Operation class that will handle LDAP requests:
+
+    ```ruby my_ldap_server.rb
+    # Custom Operation class to handle LDAP operations
+    class HashOperation < LDAP::Server::Operation
+      def initialize(connection, messageID, hash)
+        super(connection, messageID)
+        @hash = hash
+      end
+      
+      def simple_bind(version, dn, password)
+        # Accept anonymous binds (no DN)
+        unless dn.nil?
+          raise LDAP::ResultError::InvalidCredentials, "Only anonymous bind supported"
+        end
+      end
+      
+      def search(basedn, scope, deref, filter)
+        basedn = basedn.downcase
+        
+        case scope
+        when LDAP::Server::BaseObject
+          # Search for a single entry by DN
+          obj = @hash[basedn]
+          raise LDAP::ResultError::NoSuchObject unless obj
+          
+          # Check if the entry matches the filter
+          if LDAP::Server::Filter.run(filter, obj)
+            send_SearchResultEntry(basedn, obj)
+          end
+          
+        when LDAP::Server::WholeSubtree
+          # Search the entire subtree under basedn
+          @hash.each do |dn, av|
+            # Check if DN is under the base DN
+            next unless dn.end_with?(basedn)
+            
+            # Check if the entry matches the filter
+            next unless LDAP::Server::Filter.run(filter, av)
+            
+            send_SearchResultEntry(dn, av)
+          end
+          
+        else
+          raise LDAP::ResultError::UnwillingToPerform, "SingleLevel scope not implemented"
+        end
+      end
+    end
+    ```
+
+    <Info>
+      The `simple_bind` method handles authentication. For this quickstart, we only accept anonymous binds.
+      
+      The `search` method handles LDAP search operations with two scopes:
+      - `BaseObject`: Search for a specific DN
+      - `WholeSubtree`: Search all entries under the base DN
+    </Info>
+  </Step>
+
+  <Step title="Start the Server">
+    Add the server configuration and start it:
+
+    ```ruby my_ldap_server.rb
+    # Create and configure the LDAP server
+    server = LDAP::Server.new(
+      port: 1389,
+      nodelay: true,
+      listen: 10,
+      operation_class: HashOperation,
+      operation_args: [directory]
+    )
+    
+    puts "Starting LDAP server on port 1389..."
+    puts "Press Ctrl+C to stop"
+    
+    server.run_tcpserver
+    server.join
+    ```
+
+    <Note>
+      We use port 1389 (instead of the standard 389) because binding to ports below 1024 requires root privileges on most systems.
+    </Note>
+  </Step>
+
+  <Step title="Run the Server">
+    Make the file executable and run it:
+
+    ```bash
+    chmod +x my_ldap_server.rb
+    ruby my_ldap_server.rb
+    ```
+
+    You should see:
+    ```
+    Directory loaded with 3 entries
+    Starting LDAP server on port 1389...
+    Press Ctrl+C to stop
+    ```
+  </Step>
+
+  <Step title="Test with LDAP Client">
+    In a new terminal, test your server with the `ldapsearch` command:
+
+    ```bash
+    # Search for all entries
+    ldapsearch -x -H ldap://localhost:1389 -b "dc=example,dc=com" "(objectClass=*)"
+    
+    # Search for a specific user
+    ldapsearch -x -H ldap://localhost:1389 -b "dc=example,dc=com" "(uid=john)"
+    
+    # Search with a specific filter
+    ldapsearch -x -H ldap://localhost:1389 -b "dc=example,dc=com" "(cn=John Doe)"
+    ```
+
+    Expected output for the user search:
+    ```ldif
+    # extended LDIF
+    #
+    # LDAPv3
+    # base <dc=example,dc=com> with scope subtree
+    # filter: (uid=john)
+    # requesting: ALL
+    #
+    
+    # john, users, example.com
+    dn: uid=john,ou=users,dc=example,dc=com
+    objectClass: top
+    objectClass: person
+    objectClass: inetOrgPerson
+    uid: john
+    cn: John Doe
+    sn: Doe
+    mail: john@example.com
+    
+    # search result
+    search: 2
+    result: 0 Success
+    ```
+  </Step>
+</Steps>
+
+## Complete Example
+
+Here's the complete `my_ldap_server.rb` file:
+
+```ruby my_ldap_server.rb lines
+#!/usr/bin/env ruby
+
+require 'ldap/server'
+
+# Directory data - a simple hash of DN => attributes
+directory = {
+  'dc=example,dc=com' => {
+    'objectClass' => ['top', 'dcObject', 'organization'],
+    'dc' => ['example'],
+    'o' => ['Example Organization']
+  },
+  'ou=users,dc=example,dc=com' => {
+    'objectClass' => ['top', 'organizationalUnit'],
+    'ou' => ['users']
+  },
+  'uid=john,ou=users,dc=example,dc=com' => {
+    'objectClass' => ['top', 'person', 'inetOrgPerson'],
+    'uid' => ['john'],
+    'cn' => ['John Doe'],
+    'sn' => ['Doe'],
+    'mail' => ['john@example.com']
+  }
+}
+
+# Custom Operation class to handle LDAP operations
+class HashOperation < LDAP::Server::Operation
+  def initialize(connection, messageID, hash)
+    super(connection, messageID)
+    @hash = hash
+  end
+  
+  def simple_bind(version, dn, password)
+    unless dn.nil?
+      raise LDAP::ResultError::InvalidCredentials, "Only anonymous bind supported"
+    end
+  end
+  
+  def search(basedn, scope, deref, filter)
+    basedn = basedn.downcase
+    
+    case scope
+    when LDAP::Server::BaseObject
+      obj = @hash[basedn]
+      raise LDAP::ResultError::NoSuchObject unless obj
+      
+      if LDAP::Server::Filter.run(filter, obj)
+        send_SearchResultEntry(basedn, obj)
+      end
+      
+    when LDAP::Server::WholeSubtree
+      @hash.each do |dn, av|
+        next unless dn.end_with?(basedn)
+        next unless LDAP::Server::Filter.run(filter, av)
+        send_SearchResultEntry(dn, av)
+      end
+      
+    else
+      raise LDAP::ResultError::UnwillingToPerform, "SingleLevel scope not implemented"
+    end
+  end
+end
+
+# Create and configure the LDAP server
+server = LDAP::Server.new(
+  port: 1389,
+  nodelay: true,
+  listen: 10,
+  operation_class: HashOperation,
+  operation_args: [directory]
+)
+
+puts "Starting LDAP server on port 1389..."
+puts "Press Ctrl+C to stop"
+
+server.run_tcpserver
+server.join
+```
+
+## Understanding the Code
+
+### Directory Structure
+
+The `directory` hash maps Distinguished Names (DNs) to attribute hashes:
+- **Keys**: DNs in string format (e.g., `'uid=john,ou=users,dc=example,dc=com'`)
+- **Values**: Hash of attributes, where each attribute maps to an array of values
+
+### Operation Class
+
+The `HashOperation` class inherits from `LDAP::Server::Operation` and overrides:
+- **`simple_bind`**: Validates authentication (anonymous only in this example)
+- **`search`**: Performs directory searches with filter evaluation
+
+### Filter Evaluation
+
+The `LDAP::Server::Filter.run(filter, obj)` method evaluates LDAP filters against entry attributes. It supports:
+- Equality: `(uid=john)`
+- Presence: `(mail=*)`
+- Wildcards: `(cn=John*)`
+- Boolean operators: `(&(uid=john)(objectClass=person))`
+
+## Next Steps
+
+Now that you have a basic LDAP server running, explore these topics:
+
+<CardGroup cols={2}>
+  <Card title="Building Servers" icon="hammer" href="/guides/building-server">
+    Learn about advanced server configuration and deployment options
+  </Card>
+  
+  <Card title="Request Router" icon="route" href="/guides/request-router">
+    Use the modern Router pattern for cleaner, more maintainable code
+  </Card>
+  
+  <Card title="Schema Validation" icon="shield-check" href="/guides/schema">
+    Add schema validation to enforce LDAP data model compliance
+  </Card>
+  
+  <Card title="Examples" icon="code" href="/examples/hash-storage">
+    Explore more complete examples including MySQL backends and prefork servers
+  </Card>
+</CardGroup>
+
+## Testing with Ruby
+
+You can also test your server using Ruby's `net-ldap` gem:
+
+```ruby test_client.rb
+require 'net/ldap'
+
+ldap = Net::LDAP.new(
+  host: 'localhost',
+  port: 1389,
+  auth: { method: :anonymous }
+)
+
+# Search for all users
+filter = Net::LDAP::Filter.eq('objectClass', 'inetOrgPerson')
+entries = ldap.search(base: 'dc=example,dc=com', filter: filter)
+
+entries.each do |entry|
+  puts "DN: #{entry.dn}"
+  entry.each do |attr, values|
+    puts "  #{attr}: #{values.join(', ')}"
+  end
+end
+```
+
+## Common Issues
+
+<Accordion title="Connection refused error">
+  Make sure the server is running and listening on the correct port (1389). Check that no firewall is blocking the connection.
+</Accordion>
+
+<Accordion title="No search results returned">
+  Verify:
+  - The base DN matches your directory structure
+  - The search filter is correct
+  - The scope is appropriate (try `WholeSubtree` for broader searches)
+</Accordion>
+
+<Accordion title="Invalid credentials error">
+  This quickstart only supports anonymous binds. Remove the `-D` and `-w` flags from ldapsearch, or modify `simple_bind` to accept credentials.
+</Accordion>
+
+## Get Help
+
+If you run into issues:
+- Check the [Threading Guide](/guides/threading) for concurrency considerations
+- Review the [Operation API Reference](/api/operation) for method signatures
+- See [Architecture](/concepts/architecture) to understand component interactions

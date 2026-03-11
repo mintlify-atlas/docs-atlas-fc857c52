@@ -1,0 +1,491 @@
+---
+title: 'Privilege Dropping'
+description: 'Bind to privileged port 389 and drop root privileges for security'
+---
+
+This example demonstrates how to bind to the standard LDAP port (389) which requires root privileges, then safely drop those privileges to run as an unprivileged user. It also shows how to listen on both TCP ports and Unix sockets using the router pattern.
+
+## Overview
+
+The `rbslapd6.rb` example demonstrates:
+- **Privileged port binding** - Listening on port 389 (requires root)
+- **Privilege dropping** - Switching to unprivileged user after binding
+- **Router pattern** - Using route-based request handling
+- **Multiple listeners** - TCP port and Unix socket simultaneously
+- **Graceful shutdown** - Proper signal handling
+
+<Warning>
+**Security Critical**: Always drop privileges after binding to privileged ports. Running a network service as root is a security risk.
+</Warning>
+
+## Why Port 389?
+
+The standard LDAP port is 389, but ports below 1024 require root privileges to bind on Unix-like systems. This example shows the safe pattern:
+
+1. Start as root (via `sudo`)
+2. Bind to port 389
+3. Drop to unprivileged user (`ldap:ldap`)
+4. Handle requests as unprivileged user
+
+## Implementation
+
+<Steps>
+
+<Step title="Define Controller with Router Pattern">
+
+Implement a controller class with static methods for handling LDAP operations:
+
+```ruby
+class LDAPController
+  def self.bind(request, version, dn, password, params)
+    $logger.info "Processing bind route for '#{dn}' with password '#{password}'"
+  end
+
+  def self.search(request, baseObject, scope, deref, filter, params)
+    $logger.info "Processing search route for #{baseObject}"
+
+    h = {
+        'uid' => 'jdoe',
+        'objectClass' => 'userAccount',
+        'givenName' => 'John',
+        'sn' => 'Doe'
+    }
+    request.send_SearchResultEntry("uid=jdoe,#{baseObject}", h)
+  end
+end
+```
+
+**Router pattern benefits:**
+- Separates routing logic from operation handling
+- Controller methods are called directly
+- Easy to organize handlers by functionality
+- The `request` object provides access to operation methods
+
+</Step>
+
+<Step title="Configure the Router">
+
+Set up routes mapping DNs to controller methods:
+
+```ruby
+router = LDAP::Server::Router.new($logger) do
+  bind    nil => "LDAPController#bind"
+  search  "ou=Users,dc=mydomain,dc=com" => "LDAPController#search"
+end
+```
+
+**Route syntax:**
+- `bind nil` - Match all bind requests (nil matches any DN)
+- `search "ou=Users,..."` - Match searches with this base DN
+- `"ClassName#method_name"` - Controller method to invoke
+
+<Note>
+The router parses the string format and calls the appropriate class method. The method receives the request object and operation parameters.
+</Note>
+
+</Step>
+
+<Step title="Configure TCP Server with Privilege Dropping">
+
+Set up the server to listen on port 389 and drop privileges:
+
+```ruby
+params = {
+  :nodelay => true,
+  :listen => 10,
+  :router => router
+}
+
+# Listen on IP address and port
+params[:bindaddr] = '127.0.0.1' # Leave blank to listen on 0.0.0.0
+params[:port] = 389
+params[:user] = 'ldap'
+params[:group] = 'ldap'
+
+addr_server = LDAP::Server.new params
+addr_server.run_tcpserver
+```
+
+**Privilege dropping configuration:**
+- `:bindaddr` - IP address to bind (use `'0.0.0.0'` or omit for all interfaces)
+- `:port` - Port 389 (standard LDAP port)
+- `:user` - User to switch to after binding
+- `:group` - Group to switch to after binding
+
+<Warning>
+The `:user` and `:group` options cause the server to call `Process::Sys.setuid` and `Process::Sys.setgid` after binding but before accepting connections.
+</Warning>
+
+</Step>
+
+<Step title="Configure Unix Socket Server">
+
+Add a Unix socket listener for local connections:
+
+```ruby
+params.delete :bindaddr
+params.delete :port
+params[:socket] = '/tmp/rbslapd6.sock'
+
+FileUtils::rm_f params[:socket]
+
+socket_server = LDAP::Server.new params
+socket_server.run_tcpserver
+```
+
+**Unix socket benefits:**
+- No network overhead for local clients
+- Can use filesystem permissions for access control
+- Useful for local administrative tools
+
+<Note>
+Remove the socket file before creating the server to avoid "address already in use" errors.
+</Note>
+
+</Step>
+
+<Step title="Setup Signal Handling">
+
+Implement graceful shutdown:
+
+```ruby
+trap 'INT' do
+  addr_server.stop
+  socket_server.stop
+end
+
+addr_server.join
+socket_server.join
+```
+
+**Signal handling:**
+- `trap 'INT'` - Catch Ctrl-C (SIGINT)
+- `.stop` - Gracefully stop accepting new connections
+- `.join` - Wait for servers to finish
+
+</Step>
+
+</Steps>
+
+## Usage
+
+### Running the Server
+
+<Warning>
+You must run this server with `sudo` to bind to port 389:
+</Warning>
+
+```bash
+sudo ruby rbslapd6.rb
+```
+
+### Creating the ldap User/Group
+
+Before running, ensure the `ldap` user and group exist:
+
+```bash
+# On Debian/Ubuntu
+sudo addgroup --system ldap
+sudo adduser --system --ingroup ldap --no-create-home ldap
+
+# On RedHat/CentOS
+sudo groupadd -r ldap
+sudo useradd -r -g ldap -s /sbin/nologin ldap
+```
+
+### Connecting via TCP
+
+```bash
+ldapsearch -x -H ldap://127.0.0.1:389/ -b "ou=Users,dc=mydomain,dc=com" "(uid=*)"
+```
+
+### Connecting via Unix Socket
+
+```bash
+ldapsearch -x -H ldapi://%2Ftmp%2Frbslapd6.sock -b "ou=Users,dc=mydomain,dc=com" "(uid=*)"
+```
+
+<Note>
+The path `/tmp/rbslapd6.sock` is URL-encoded as `%2Ftmp%2Frbslapd6.sock` in the LDAP URI.
+</Note>
+
+## Router Pattern
+
+### How Routes Work
+
+The router matches requests to handlers based on operation type and parameters:
+
+```ruby
+router = LDAP::Server::Router.new($logger) do
+  # Match all bind requests
+  bind nil => "AuthController#authenticate"
+  
+  # Match searches under specific base DNs
+  search "ou=Users,dc=example,dc=com" => "UserController#search"
+  search "ou=Groups,dc=example,dc=com" => "GroupController#search"
+  
+  # Match modifications
+  modify "ou=Users,dc=example,dc=com" => "UserController#modify"
+end
+```
+
+### Controller Method Signatures
+
+Each operation type has a specific signature:
+
+```ruby
+class MyController
+  # Bind: (request, version, dn, password, params)
+  def self.bind(request, version, dn, password, params)
+    # Return normally for success
+    # Raise LDAP::ResultError for failures
+  end
+  
+  # Search: (request, baseObject, scope, deref, filter, params)
+  def self.search(request, baseObject, scope, deref, filter, params)
+    # Send entries using request.send_SearchResultEntry
+  end
+  
+  # Add: (request, dn, attributes, params)
+  def self.add(request, dn, attributes, params)
+    # Process the add
+  end
+  
+  # Modify: (request, dn, operations, params)
+  def self.modify(request, dn, operations, params)
+    # Process modifications
+  end
+  
+  # Delete: (request, dn, params)
+  def self.delete(request, dn, params)
+    # Process deletion
+  end
+end
+```
+
+### Sending Results
+
+Use the `request` object to send responses:
+
+```ruby
+def self.search(request, baseObject, scope, deref, filter, params)
+  entries = find_entries(baseObject, scope, filter)
+  
+  entries.each do |dn, attrs|
+    request.send_SearchResultEntry(dn, attrs)
+  end
+  
+  # Success response sent automatically after method returns
+end
+```
+
+### Error Handling
+
+```ruby
+def self.bind(request, version, dn, password, params)
+  user = find_user(dn)
+  
+  raise LDAP::ResultError::NoSuchObject unless user
+  raise LDAP::ResultError::InvalidCredentials unless check_password(user, password)
+  
+  # Success if no exception raised
+end
+```
+
+## Security Considerations
+
+### Privilege Dropping Process
+
+```ruby
+1. Process starts as root (UID 0)
+2. Bind socket to port 389
+3. Call setgid(ldap-gid)
+4. Call setuid(ldap-uid)
+5. Process now runs as ldap:ldap
+6. Accept and handle connections
+```
+
+<Warning>
+**Critical security practices:**
+
+- Always drop privileges BEFORE handling any client data
+- Use a dedicated unprivileged user (never nobody, www-data, etc.)
+- The user should have minimal filesystem access
+- The user should not own any important files
+- Set proper permissions on socket files
+</Warning>
+
+### File System Permissions
+
+Ensure proper ownership:
+
+```bash
+# Server binary should be owned by root
+sudo chown root:root rbslapd6.rb
+sudo chmod 755 rbslapd6.rb
+
+# Socket directory should allow ldap user to write
+sudo mkdir -p /var/run/ldap
+sudo chown ldap:ldap /var/run/ldap
+sudo chmod 755 /var/run/ldap
+```
+
+Then update the socket path:
+
+```ruby
+params[:socket] = '/var/run/ldap/ldap.sock'
+```
+
+### Bind Address Security
+
+For production, consider security implications:
+
+```ruby
+# Listen only on localhost (most secure)
+params[:bindaddr] = '127.0.0.1'
+
+# Listen on specific internal IP
+params[:bindaddr] = '10.0.1.5'
+
+# Listen on all interfaces (requires firewall)
+params[:bindaddr] = '0.0.0.0'
+# or omit :bindaddr entirely
+```
+
+## Production Deployment
+
+### systemd Service
+
+Create `/etc/systemd/system/rbslapd.service`:
+
+```ini
+[Unit]
+Description=Ruby LDAP Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/ruby /opt/rbslapd/rbslapd6.rb
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/run/ldap
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable rbslapd
+sudo systemctl start rbslapd
+sudo systemctl status rbslapd
+```
+
+### Logging
+
+For production, log to syslog:
+
+```ruby
+require 'syslog/logger'
+$logger = Syslog::Logger.new('rbslapd')
+```
+
+Or use the logger gem:
+
+```ruby
+require 'logger'
+$logger = Logger.new('/var/log/rbslapd/server.log', 'daily')
+$logger.level = Logger::INFO
+```
+
+## Multiple Server Instances
+
+You can run multiple server instances with different configurations:
+
+```ruby
+# Public-facing server (read-only)
+public_router = LDAP::Server::Router.new($logger) do
+  search "dc=example,dc=com" => "PublicController#search"
+end
+
+public_server = LDAP::Server.new(
+  :bindaddr => '0.0.0.0',
+  :port => 389,
+  :user => 'ldap',
+  :group => 'ldap',
+  :router => public_router
+)
+
+# Admin server (full access, local only)
+admin_router = LDAP::Server::Router.new($logger) do
+  bind nil => "AdminController#bind"
+  search "dc=example,dc=com" => "AdminController#search"
+  add "dc=example,dc=com" => "AdminController#add"
+  modify "dc=example,dc=com" => "AdminController#modify"
+  delete "dc=example,dc=com" => "AdminController#delete"
+end
+
+admin_server = LDAP::Server.new(
+  :socket => '/var/run/ldap/admin.sock',
+  :router => admin_router
+)
+
+public_server.run_tcpserver
+admin_server.run_tcpserver
+
+trap('INT') { public_server.stop; admin_server.stop }
+
+public_server.join
+admin_server.join
+```
+
+## Troubleshooting
+
+### Permission Denied on Port 389
+
+```
+Permission denied - bind(2) for 127.0.0.1:389
+```
+
+**Solution:** Run with `sudo`
+
+### User 'ldap' Not Found
+
+```
+can't find user for ldap (ArgumentError)
+```
+
+**Solution:** Create the ldap user and group (see above)
+
+### Socket Already in Use
+
+```
+Address already in use - bind(2) for /tmp/rbslapd6.sock
+```
+
+**Solution:** Remove the socket file:
+```bash
+rm /tmp/rbslapd6.sock
+```
+
+Or add cleanup in the code:
+```ruby
+FileUtils::rm_f params[:socket]
+```
+
+## Next Steps
+
+- [Router Documentation](/guides/request-router) - Advanced routing patterns
+- [Authentication](/guides/building-server) - Implement real authentication
+- [TLS/SSL](/guides/ssl-tls) - Add encryption to your server

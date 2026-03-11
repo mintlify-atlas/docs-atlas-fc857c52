@@ -1,0 +1,280 @@
+---
+title: "LDAP::Server::Schema::ObjectClass"
+description: "Represents an LDAP object class definition (RFC2252 section 4.4)"
+---
+
+## Overview
+
+The `LDAP::Server::Schema::ObjectClass` class represents an LDAP ObjectClassDescription as defined in RFC2252 section 4.4. It encapsulates all properties of an object class including OID, names, superior classes, structural type, and required/optional attributes.
+
+## Class Methods
+
+### new
+
+Creates a new ObjectClass instance by parsing an RFC2252-compliant object class definition string.
+
+<ParamField path="str" type="string" required>
+  RFC2252-compliant ObjectClassDescription string
+</ParamField>
+
+```ruby
+oc = LDAP::Server::Schema::ObjectClass.new(
+  "( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST ( sn $ cn ) MAY ( userPassword $ telephoneNumber ) )"
+)
+```
+
+**Raises:** `LDAP::ResultError::InvalidAttributeSyntax` if the definition string is malformed
+
+## Instance Methods
+
+### name
+
+Returns the primary name of the object class (the first name in the names array).
+
+```ruby
+oc = LDAP::Server::Schema::ObjectClass.new(
+  "( 2.5.6.6 NAME ( 'person' 'personObject' ) SUP top STRUCTURAL MUST cn )"
+)
+puts oc.name  # => "person"
+```
+
+**Returns:** String - The primary object class name, or nil if no names are defined
+
+### to_s
+
+Returns a string representation of the object class, using the primary name if available, otherwise the OID.
+
+```ruby
+puts oc.to_s  # => "person"
+```
+
+**Returns:** String - The primary name or OID
+
+### to_def
+
+Returns the complete RFC2252-compliant definition string for this object class. The result is cached until `changed` is called.
+
+```ruby
+oc_def = oc.to_def
+# => "( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST ( sn $ cn ) MAY ( userPassword $ telephoneNumber ) )"
+```
+
+**Returns:** String - RFC2252-compliant ObjectClassDescription
+
+### changed
+
+Clears the cached definition string, forcing it to be rebuilt on the next call to `to_def`.
+
+```ruby
+oc.changed
+```
+
+## Attribute Readers
+
+All properties of the object class are accessible via reader methods:
+
+### oid
+
+The object identifier (OID) for this object class.
+
+```ruby
+puts oc.oid  # => "2.5.6.6"
+```
+
+**Returns:** String - The OID
+
+### names
+
+Array of all names and aliases for this object class.
+
+```ruby
+puts oc.names.inspect  # => ["person", "personObject"]
+```
+
+**Returns:** Array of strings
+
+### desc
+
+The description text for this object class.
+
+```ruby
+puts oc.desc  # => "RFC2256: a person"
+```
+
+**Returns:** String or nil
+
+### obsolete
+
+Indicates whether this object class is marked as obsolete.
+
+```ruby
+puts oc.obsolete  # => false
+```
+
+**Returns:** Boolean
+
+### sup
+
+Array of superior object classes from which this class inherits. After `resolve_oids` is called on the schema, this becomes an array of ObjectClass objects rather than strings.
+
+```ruby
+puts oc.sup.inspect  # => ["top"] (before resolve_oids)
+# or
+puts oc.sup.map(&:name).inspect  # => ["top"] (after resolve_oids)
+```
+
+**Returns:** Array of strings, array of ObjectClass instances, or nil
+
+### struct
+
+The structural type of this object class as a symbol.
+
+```ruby
+puts oc.struct  # => :structural
+```
+
+**Returns:** Symbol - One of `:structural`, `:abstract`, or `:auxiliary`. Defaults to `:structural` if not specified.
+
+### must
+
+Array of required attribute types. After `resolve_oids` is called on the schema, this becomes an array of AttributeType objects rather than strings.
+
+```ruby
+puts oc.must.inspect  # => ["sn", "cn"] (before resolve_oids)
+# or
+puts oc.must.map(&:name).inspect  # => ["sn", "cn"] (after resolve_oids)
+```
+
+**Returns:** Array of strings, array of AttributeType instances, or nil
+
+### may
+
+Array of optional attribute types. After `resolve_oids` is called on the schema, this becomes an array of AttributeType objects rather than strings.
+
+```ruby
+puts oc.may.inspect  # => ["userPassword", "telephoneNumber"] (before resolve_oids)
+# or
+puts oc.may.map(&:name).inspect  # => ["userPassword", "telephoneNumber"] (after resolve_oids)
+```
+
+**Returns:** Array of strings, array of AttributeType instances, or nil
+
+## Example Usage
+
+```ruby
+require 'ldap/server/schema'
+
+# Create an object class from a definition
+oc_def = <<~DEF
+  ( 2.5.6.6
+    NAME 'person'
+    DESC 'RFC2256: a person'
+    SUP top
+    STRUCTURAL
+    MUST ( sn $ cn )
+    MAY ( userPassword $ telephoneNumber $ seeAlso $ description )
+  )
+DEF
+
+oc = LDAP::Server::Schema::ObjectClass.new(oc_def)
+
+# Access properties
+puts "Name: #{oc.name}"
+puts "OID: #{oc.oid}"
+puts "All names: #{oc.names.join(', ')}"
+puts "Description: #{oc.desc}"
+puts "Superior: #{oc.sup.join(', ')}"
+puts "Type: #{oc.struct}"
+puts "Required attributes: #{oc.must.join(', ')}"
+puts "Optional attributes: #{oc.may.join(', ')}"
+
+# Get the complete definition
+puts oc.to_def
+```
+
+## Structural Types
+
+LDAP object classes can have three structural types:
+
+### :structural
+
+Structural object classes define the basic structure of an entry. Every entry must have exactly one structural object class (or a chain of structural classes via inheritance).
+
+```ruby
+oc = LDAP::Server::Schema::ObjectClass.new(
+  "( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST cn )"
+)
+puts oc.struct  # => :structural
+```
+
+### :abstract
+
+Abstract object classes define common characteristics that can be inherited by other classes but cannot be used directly in entries. The 'top' class is the most common example.
+
+```ruby
+oc = LDAP::Server::Schema::ObjectClass.new(
+  "( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )"
+)
+puts oc.struct  # => :abstract
+```
+
+### :auxiliary
+
+Auxiliary object classes provide additional attributes to entries and can be added to any entry alongside the structural class.
+
+```ruby
+oc = LDAP::Server::Schema::ObjectClass.new(
+  "( 1.3.6.1.4.1.1466.101.120.111 NAME 'extensibleObject' AUXILIARY )"
+)
+puts oc.struct  # => :auxiliary
+```
+
+## Reference Resolution
+
+When an object class references superior classes or attribute types, these references are initially stored as strings (names or OIDs). After calling `resolve_oids` on the schema, these strings are replaced with references to the actual schema objects.
+
+```ruby
+schema = LDAP::Server::Schema.new
+schema.add_objectclass("( 2.5.6.0 NAME 'top' ABSTRACT MUST objectClass )")
+schema.add_attrtype("( 2.5.4.3 NAME 'cn' EQUALITY caseIgnoreMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )")
+schema.add_objectclass("( 2.5.6.6 NAME 'person' SUP top STRUCTURAL MUST cn )")
+
+person = schema.find_objectclass('person')
+puts person.sup.inspect  # => ["top"] (before resolve_oids)
+
+schema.resolve_oids
+
+puts person.sup.inspect  # => [#<LDAP::Server::Schema::ObjectClass:...>]
+puts person.sup.first.name  # => "top"
+puts person.must.first.name  # => "cn"
+```
+
+## Validation
+
+The `LDAP::Server::Schema#validate` method uses ObjectClass definitions to enforce:
+
+- At least one structural object class must be present
+- All MUST attributes must be provided with non-empty values
+- Only MAY or MUST attributes (or those allowed by extensibleObject) can be present
+- Superior object classes are automatically added
+
+```ruby
+schema = LDAP::Server::Schema.new
+schema.load_system
+schema.resolve_oids
+
+entry = {
+  'objectClass' => ['person'],
+  'cn' => ['John Doe'],
+  'sn' => ['Doe']
+}
+
+validated = schema.validate(entry)
+puts validated['objectClass'].inspect  # => ["person", "top"] (top is added automatically)
+```
+
+## See Also
+
+- [LDAP::Server::Schema](/api/schema) - Main schema class
+- [LDAP::Server::Schema::AttributeType](/api/attribute-types) - AttributeType class details
+- RFC2252 Section 4.4 - ObjectClassDescription specification

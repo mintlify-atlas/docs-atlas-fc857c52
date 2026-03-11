@@ -1,0 +1,278 @@
+---
+title: Installation
+description: How to install ruby-ldapserver and configure your Ruby environment
+---
+
+## Requirements
+
+### Ruby Version
+
+ruby-ldapserver requires **Ruby 2.3 or higher**.
+
+```bash
+# Check your Ruby version
+ruby --version
+```
+
+<Note>
+  While Ruby 2.3+ is the minimum requirement, we recommend using a currently supported Ruby version (2.7+ or 3.x) for security updates and performance improvements.
+</Note>
+
+### OpenSSL Extension
+
+The framework requires the OpenSSL extension for ASN.1 encoding and decoding. This extension is included in the standard Ruby distribution (since Ruby 1.8.2).
+
+**Verify OpenSSL is available:**
+
+```bash
+ruby -ropenssl -e puts
+```
+
+If this command runs without errors, OpenSSL is properly installed.
+
+<Warning>
+  When compiling Ruby from source on Linux systems, the OpenSSL extension is not always built automatically. See the troubleshooting section below if you encounter issues.
+</Warning>
+
+## Installation Methods
+
+### Using RubyGems (Recommended)
+
+Install ruby-ldapserver directly using the `gem` command:
+
+```bash
+gem install ruby-ldapserver
+```
+
+### Using Bundler
+
+For applications using Bundler, add ruby-ldapserver to your `Gemfile`:
+
+```ruby Gemfile
+source 'https://rubygems.org'
+
+gem 'ruby-ldapserver'
+```
+
+Then install dependencies:
+
+```bash
+bundle install
+```
+
+### Installing from Source
+
+To install from the GitHub repository:
+
+```bash
+git clone https://github.com/larskanis/ruby-ldapserver.git
+cd ruby-ldapserver
+bundle install
+rake install
+```
+
+## Verification
+
+Verify the installation by requiring the library in an IRB session:
+
+```ruby
+irb
+```
+
+```ruby
+require 'ldap/server'
+
+# Check the version
+puts LDAP::Server::VERSION
+# => "0.7.0" (or current version)
+```
+
+If the library loads without errors, installation was successful.
+
+## Optional Dependencies
+
+### For Testing
+
+If you want to run the test suite, install the `net-ldap` client library:
+
+```bash
+gem install net-ldap
+```
+
+Or add to your `Gemfile`:
+
+```ruby Gemfile
+group :development, :test do
+  gem 'net-ldap', '~> 0.10'
+  gem 'rspec', '~> 3.1'
+  gem 'test-unit', '~> 3.0'
+end
+```
+
+### For Preforking Server
+
+If you plan to use the preforking server mode (for high-concurrency scenarios), install the `prefork` library:
+
+```bash
+gem install prefork
+```
+
+<Note>
+  The preforking server is optional. The default threading-based TCP server is sufficient for most use cases.
+</Note>
+
+## Troubleshooting
+
+### OpenSSL Extension Not Found
+
+If you're compiling Ruby from source and the OpenSSL extension is not available, you may need to specify the OpenSSL library location.
+
+#### Red Hat / CentOS / Fedora
+
+When building Ruby, set these environment variables before running `./configure`:
+
+```bash
+export CPPFLAGS="-I/usr/kerberos/include"
+export LDFLAGS="-L/usr/kerberos/lib"
+./configure
+make
+make install
+```
+
+#### Ubuntu / Debian
+
+Install the OpenSSL development package:
+
+```bash
+sudo apt-get install libssl-dev
+```
+
+Then rebuild Ruby:
+
+```bash
+./configure --with-openssl-dir=/usr
+make
+make install
+```
+
+#### macOS
+
+If using Homebrew:
+
+```bash
+brew install openssl
+```
+
+Then configure Ruby to use Homebrew's OpenSSL:
+
+```bash
+export RUBY_CONFIGURE_OPTS="--with-openssl-dir=$(brew --prefix openssl)"
+rbenv install 3.2.0  # or your Ruby version
+```
+
+### Version Conflicts
+
+If you have multiple versions of ruby-ldapserver installed:
+
+```bash
+# List all installed versions
+gem list ruby-ldapserver
+
+# Uninstall a specific version
+gem uninstall ruby-ldapserver -v 0.6.0
+
+# Keep only the latest version
+gem cleanup ruby-ldapserver
+```
+
+### Permission Errors
+
+If you encounter permission errors during installation:
+
+```bash
+# Use sudo (not recommended for development)
+sudo gem install ruby-ldapserver
+
+# Or better: use rbenv/rvm for user-level Ruby installation
+# With rbenv:
+rbenv install 3.2.0
+rbenv global 3.2.0
+gem install ruby-ldapserver  # No sudo needed
+```
+
+<Warning>
+  Installing gems with `sudo` can cause permission issues with your Ruby environment. Consider using a Ruby version manager like rbenv or rvm instead.
+</Warning>
+
+## Configuration
+
+### Network Configuration
+
+By default, LDAP servers listen on port **389** (standard LDAP) or **636** (LDAPS). Since these are privileged ports (< 1024), you'll need either:
+
+1. **Run on a non-privileged port** (recommended for development):
+   ```ruby
+   LDAP::Server.new(port: 1389)
+   ```
+
+2. **Use port forwarding** (for production):
+   ```bash
+   # Forward port 389 to 1389
+   sudo iptables -t nat -A PREROUTING -p tcp --dport 389 -j REDIRECT --to-port 1389
+   ```
+
+3. **Grant capability to bind privileged ports** (Linux):
+   ```bash
+   sudo setcap 'cap_net_bind_service=+ep' /path/to/ruby
+   ```
+
+4. **Drop privileges after binding** (see configuration options):
+   ```ruby
+   LDAP::Server.new(
+     port: 389,
+     user: 'ldap',   # Drop to this user after binding
+     group: 'ldap'   # Drop to this group after binding
+   )
+   ```
+
+### SSL/TLS Configuration
+
+For production deployments with SSL/TLS, you'll need certificate files:
+
+```ruby
+LDAP::Server.new(
+  port: 636,
+  ssl_key_file: 'server-key.pem',
+  ssl_cert_file: 'server-cert.pem',
+  ssl_on_connect: true
+)
+```
+
+See the examples directory for certificate generation scripts.
+
+## Next Steps
+
+<Steps>
+  <Step title="Build your first server">
+    Follow the [Quick Start guide](/quickstart) to create a minimal LDAP server
+  </Step>
+  
+  <Step title="Explore examples">
+    Check out the `examples/` directory in the source repository for more advanced implementations
+  </Step>
+  
+  <Step title="Read the API documentation">
+    Review the RDoc documentation for detailed API information
+  </Step>
+</Steps>
+
+## Getting Help
+
+For questions and support:
+
+- **GitHub Issues**: [https://github.com/larskanis/ruby-ldapserver/issues](https://github.com/larskanis/ruby-ldapserver/issues)
+- **LDAP General Questions**: [`ldap@umich.edu` mailing list](http://listserver.itd.umich.edu/cgi-bin/lyris.pl?enter=ldap)
+
+<Note>
+  For general LDAP protocol questions (not specific to ruby-ldapserver), please use the LDAP mailing list rather than contacting the maintainers directly.
+</Note>
